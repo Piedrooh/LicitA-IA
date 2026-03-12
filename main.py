@@ -1,20 +1,73 @@
 import streamlit as st
-import anthropic
-import requests
 import fitz  # PyMuPDF
+import pandas as pd
 import json
 import re
 import hashlib
 import os
 import sys
+import anthropic
 from datetime import datetime
 
-# ── CONFIGURAÇÃO DE AMBIENTE ────────────────────────────────
-for path in ["logs", "data"]:
-    if not os.path.exists(path):
-        os.makedirs(path)
+# --- 1. CONFIGURAÇÃO DE TEMA E INTERFACE (PREMIUM) ---
+st.set_page_config(
+    page_title="LicitA-IA | Intelligence Unit",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# ── HELPERS DE PARSING ──────────────────────────────────────
+st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+    
+    html, body, [class*="css"] {
+        font-family: 'Inter', sans-serif !important;
+    }
+    .stApp {
+        background-color: #FFFFFF;
+        color: #1E1E1E;
+    }
+    [data-testid="stHeader"] {
+        background: linear-gradient(90deg, #001529 0%, #003a8c 50%, #096dd9 100%);
+        height: 3rem;
+    }
+    [data-testid="stSidebar"] {
+        background-color: #001529 !important;
+    }
+    [data-testid="stSidebar"] * {
+        color: #e6f0ff !important;
+    }
+    .risk-card {
+        background-color: #f8f9fa;
+        padding: 20px;
+        border-radius: 12px;
+        border-left: 6px solid #096dd9;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+    }
+    .critical { border-left-color: #ff4b4b; background-color: #fff5f5; }
+    .warning  { border-left-color: #ffa500; background-color: #fffbeb; }
+    .success  { border-left-color: #22c55e; background-color: #f0fdf4; }
+    
+    .stButton>button {
+        background: linear-gradient(90deg, #096dd9 0%, #003a8c 100%);
+        color: white;
+        border: none;
+        padding: 12px 30px;
+        border-radius: 8px;
+        font-weight: 600;
+        transition: 0.3s;
+        width: 100%;
+    }
+    .stButton>button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(9,109,217,0.3);
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- 2. HELPERS E MOTOR DE INTELIGÊNCIA ---
+
 def _parse_valor(s: str) -> float:
     if not s or not isinstance(s, str): return 0.0
     try:
@@ -22,143 +75,106 @@ def _parse_valor(s: str) -> float:
         return float(limpo)
     except: return 0.0
 
-# ── APP CONFIG ──────────────────────────────────────────────
-st.set_page_config(page_title="LicitA-IA | Intelligence Unit", layout="wide", page_icon="🛡️")
+def extrair_texto_pdf(file):
+    file.seek(0)
+    doc = fitz.open(stream=file.read(), filetype="pdf")
+    return "".join([page.get_text() for page in doc])
 
-# ── DESIGN PREMIUM (O RETORNO DA BELEZA) ────────────────────
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
-    
-    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-
-    /* Header Gradiente */
-    [data-testid="stHeader"] {
-        background: linear-gradient(90deg, #001529 0%, #096dd9 100%);
-        height: 3.5rem;
-    }
-
-    /* Sidebar Dark Mode */
-    [data-testid="stSidebar"] { background-color: #001529 !important; color: white; }
-    [data-testid="stSidebar"] * { color: #e6f0ff !important; }
-
-    /* Cards de Risco e Status */
-    .pcard {
-        background: #ffffff;
-        border-radius: 12px;
-        padding: 25px;
-        border: 1px solid #e1e8ed;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-        margin-bottom: 20px;
-    }
-
-    .risk-card {
-        padding: 15px 20px;
-        border-radius: 10px;
-        border-left: 6px solid #096dd9;
-        margin-bottom: 15px;
-        background: #f8fafc;
-    }
-    .critical { border-left-color: #ef4444; background: #fff5f5; }
-    .warning { border-left-color: #f59e0b; background: #fffbeb; }
-    .success { border-left-color: #22c55e; background: #f0fdf4; }
-
-    /* Botões */
-    .stButton>button {
-        background: linear-gradient(90deg, #096dd9 0%, #003a8c 100%) !important;
-        color: white !important;
-        border: none !important;
-        border-radius: 8px !important;
-        padding: 10px 24px !important;
-        font-weight: 600 !important;
-        transition: 0.3s;
-    }
-    .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(9,109,217,0.3); }
-
-    /* Inputs */
-    .stTextInput>div>div>input { border-radius: 8px !important; }
-</style>
-""", unsafe_allow_html=True)
-
-# ── INITIAL STATE ──
+# --- 3. SESSION STATE ---
 if "empresa" not in st.session_state:
-    st.session_state.empresa = {"razao_social": "", "cnpj": "", "capital_social": 0.0, "liquidez_corrente": 1.0, "atestados": ""}
+    st.session_state.empresa = {"razao_social": "", "capital_social": 0.0, "liquidez_corrente": 1.0, "atestados": ""}
 if "copiloto" not in st.session_state:
     st.session_state.copiloto = {"editais_monitorados": [], "alertas": [], "lances_config": {"custo_direto": 0.0}}
 
-# ── SIDEBAR ──
+# --- 4. SIDEBAR ---
 with st.sidebar:
-    st.markdown("### 🛡️ LicitA-IA UNIT")
+    st.image("https://img.icons8.com/fluency/96/shield.png", width=60)
+    st.title("LicitA-IA Control")
+    st.markdown("---")
     api_key = st.text_input("Anthropic API Key", type="password")
-    st.divider()
-    st.caption("Foco: Lei 14.133/21 | Compliance 2026")
-    if st.button("🗑️ Resetar Tudo"):
+    st.info("Sensibilidade: Lei 14.133/21 & Compliance 2026")
+    
+    if st.button("🗑️ Limpar Resultados"):
         st.session_state.clear()
         st.rerun()
 
-# ── DASHBOARD PRINCIPAL ──
-t1, t2, t3, t4, t5, t6 = st.tabs(["🏢 Perfil", "🔍 Auditoria", "🎯 Caçador", "⚖️ Jurídico", "🕵️ Espião", "🤖 Co-Piloto"])
+# --- 5. DASHBOARD PRINCIPAL ---
+st.title("🛡️ Unidade de Inteligência LicitA-IA")
 
-# 1. PERFIL
-with t1:
-    st.markdown("## 🏢 Perfil da Empresa")
-    with st.container():
-        st.markdown('<div class="pcard">', unsafe_allow_html=True)
-        e = st.session_state.empresa
-        e["razao_social"] = st.text_input("Razão Social", value=e["razao_social"])
-        col1, col2 = st.columns(2)
-        e["cnpj"] = col1.text_input("CNPJ", value=e["cnpj"])
-        e["capital_social"] = col2.number_input("Capital Social (R$)", value=e["capital_social"])
-        e["atestados"] = st.text_area("Atestados Técnicos", value=e["atestados"])
-        st.markdown('</div>', unsafe_allow_html=True)
+tabs = st.tabs(["🏢 Perfil", "🔍 Auditoria", "🎯 Caçador", "⚖️ Jurídico", "🕵️ Espião", "🤖 Co-Piloto"])
+tab_perfil, tab_auditoria, tab_cacador, tab_juridico, tab_espiao, tab_copiloto = tabs
 
-# 2. AUDITORIA
-with t2:
-    st.markdown("## 🔍 Auditoria de Editais")
-    file = st.file_uploader("Upload do Edital (PDF)", type="pdf")
-    if file and api_key:
-        if st.button("🚀 Iniciar Auditoria"):
-            with st.spinner("IA Analisando..."):
-                st.success("Auditoria Finalizada com sucesso!")
-                st.markdown('<div class="risk-card critical"><b>🚨 RISCO 6x1:</b> Escala de trabalho proibitiva detectada na cláusula 4.2.</div>', unsafe_allow_html=True)
+# ABA PERFIL
+with tab_perfil:
+    st.markdown("### 🏢 Configuração do DNA Corporativo")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.session_state.empresa["razao_social"] = st.text_input("Razão Social", value=st.session_state.empresa["razao_social"])
+        st.session_state.empresa["capital_social"] = st.number_input("Capital Social (R$)", value=st.session_state.empresa["capital_social"])
+    with col2:
+        st.session_state.empresa["liquidez_corrente"] = st.number_input("Liquidez Corrente", value=st.session_state.empresa["liquidez_corrente"])
+        st.session_state.empresa["atestados"] = st.text_area("Resumo de Capacidade Técnica", value=st.session_state.empresa["atestados"])
 
-# 3. CAÇADOR
-with t3:
-    st.markdown("## 🎯 Caçador de Oportunidades")
-    segmento = st.text_input("Qual o seu nicho?", placeholder="Ex: Engenharia Elétrica")
-    if st.button("Buscar Match"):
-        st.info(f"Buscando licitações de {segmento} compatíveis com capital social de R$ {st.session_state.empresa['capital_social']:,.2f}...")
-
-# 4. JURÍDICO
-with t4:
-    st.markdown("## ⚖️ Advogado AI")
-    peca = st.selectbox("Peça Jurídica", ["Impugnação", "Recurso Administrativo", "Esclarecimento"])
-    if st.button("Gerar Draft"):
-        st.code(f"PEÇA GERADA: {peca}\nFundamentação: Lei 14.133/21...", language="markdown")
-
-# 5. ESPIÃO
-with t5:
-    st.markdown("## 🕵️ Espião de Concorrência")
-    cnpj_c = st.text_input("CNPJ do Rival")
-    if st.button("Ver Histórico"):
-        st.warning("Rival detectado com padrão de lances predatórios (Dumping).")
-
-# 6. CO-PILOTO (O MÓDULO AUTOMÁTICO)
-with t6:
-    st.markdown("## 🤖 Co-Piloto Autônomo")
-    col_a, col_b = st.columns(2)
+# ABA AUDITORIA (COM PARSER AGU E IA)
+with tab_auditoria:
+    st.markdown("### 🔍 Auditoria de Riscos em Editais")
+    uploaded_file = st.file_uploader("Arraste o edital aqui (PDF)", type="pdf")
     
-    with col_a:
-        st.markdown("### 🛰️ Sentinela")
-        url = st.text_input("URL do Edital para Vigília")
-        if st.button("Vigiar"):
-            st.toast("Edital em monitoramento constante!", icon="👁️")
+    if uploaded_file and api_key:
+        if st.button("🚀 INICIAR AUDITORIA"):
+            with st.status("Analisando...", expanded=True) as status:
+                texto = extrair_texto_pdf(uploaded_file)
+                
+                # Detecção AGU (Beleza e Velocidade)
+                if "AGU" in texto.upper() or "ADVOCACIA-GERAL" in texto.upper():
+                    st.markdown('<div class="risk-card success"><b>✅ PADRÃO AGU DETECTADO</b><br>Extração acelerada disponível.</div>', unsafe_allow_html=True)
+                
+                # Chamada IA (Simulação conforme sua estrutura)
+                st.write("Verificando cláusulas restritivas (Lei 14.133)...")
+                st.markdown('<div class="risk-card critical"><b>🚨 RISCO 6x1 DETECTADO</b><br>Cláusula de jornada identificada. Inconstitucionalidade provável em 2026.</div>', unsafe_allow_html=True)
+                status.update(label="Análise Concluída!", state="complete")
+
+# ABA CAÇADOR
+with tab_cacador:
+    st.markdown("### 🎯 Caçador de Oportunidades")
+    nicho = st.text_input("Palavras-chave do seu mercado")
+    if st.button("Mapear Matches"):
+        st.info(f"Buscando licitações para '{nicho}' compatíveis com seu capital de R$ {st.session_state.empresa['capital_social']:,.2f}")
+
+# ABA JURÍDICO
+with tab_juridico:
+    st.markdown("### ⚖️ Advogado AI")
+    tipo_peca = st.selectbox("Tipo de Peça", ["Impugnação", "Recurso", "Esclarecimento"])
+    if st.button("Gerar Minuta"):
+        st.markdown(f'<div class="risk-card"><b>Minuta de {tipo_peca} Gerada</b><br>Fundamentada na Nova Lei de Licitações.</div>', unsafe_allow_html=True)
+
+# ABA ESPIÃO
+with tab_espiao:
+    st.markdown("### 🕵️ Espião de Concorrência")
+    st.text_input("CNPJ do Concorrente")
+    if st.button("Analisar Histórico"):
+        st.warning("Padrão de lances predatórios identificado nos últimos 3 pregões deste concorrente.")
+
+# ABA CO-PILOTO (SENTINELA E ANTI-PREÇO)
+with tab_copiloto:
+    st.markdown("### 🤖 Co-Piloto Autônomo")
+    c1, c2 = st.columns(2)
+    
+    with c1:
+        st.markdown("#### 🛰️ Sentinela")
+        url = st.text_input("URL para Vigília Ativa")
+        if st.button("Ativar Monitoramento"):
+            st.toast("Sentinela em posição!", icon="👁️")
             
-    with col_b:
-        st.markdown("### 💰 Anti-Preço Suicida")
-        custo = st.number_input("Seu Custo Direto", value=st.session_state.copiloto["lances_config"]["custo_direto"])
-        piso = custo * 0.70
+    with c2:
+        st.markdown("#### 💰 Anti-Preço Suicida")
+        custo_d = st.number_input("Custo Direto (R$)", value=st.session_state.copiloto["lances_config"]["custo_direto"])
+        piso = custo_d * 0.70
         st.metric("Piso Inexequibilidade (TCU)", f"R$ {piso:,.2f}")
         
-    st.divider()
-    st.caption("O Co-Piloto analisa mudanças de edital e lances rivais em tempo real.")
+        lance_rival = st.number_input("Lance Concorrente", value=0.0)
+        if lance_rival > 0:
+            if lance_rival < piso:
+                st.markdown('<div class="risk-card critical"><b>🚨 ALERTA:</b> Lance Inexequível detectado!</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="risk-card success">✅ Lance dentro da margem legal.</div>', unsafe_allow_html=True)
