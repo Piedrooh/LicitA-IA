@@ -26,15 +26,49 @@ html, body, [class*="css"] {
     background: linear-gradient(90deg, #001529 0%, #003a8c 50%, #096dd9 100%);
     height: 3rem;
 }
-/* ── Sidebar ──────────────────────────────────────────── */
+/* ── Sidebar — dark navy fixo (identidade visual) ─────── */
 [data-testid="stSidebar"] {
-    background: var(--secondary-background-color) !important;
-    border-right: 1px solid rgba(128,128,128,0.12) !important;
+    background: #001529 !important;
+    border-right: none !important;
 }
-[data-testid="stSidebar"] h1 {
-    font-size: 18px !important;
-    font-weight: 700 !important;
-    color: var(--text-color) !important;
+[data-testid="stSidebar"] * {
+    color: #e6f0ff !important;
+}
+/* Inputs dentro da sidebar */
+[data-testid="stSidebar"] input {
+    background: rgba(255,255,255,0.08) !important;
+    border: 1px solid rgba(255,255,255,0.15) !important;
+    color: #fff !important;
+    border-radius: 6px !important;
+}
+[data-testid="stSidebar"] label {
+    color: rgba(255,255,255,0.5) !important;
+    font-size: 10px !important;
+    letter-spacing: 0.08em !important;
+    text-transform: uppercase !important;
+}
+/* Botão limpar dentro da sidebar */
+[data-testid="stSidebar"] .stButton > button {
+    background: rgba(255,255,255,0.08) !important;
+    border: 1px solid rgba(255,255,255,0.2) !important;
+    color: #e6f0ff !important;
+    box-shadow: none !important;
+    font-size: 12px !important;
+    padding: 8px 16px !important;
+}
+[data-testid="stSidebar"] .stButton > button:hover {
+    background: rgba(255,255,255,0.14) !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+/* Remove os widgets nativos de st.success/st.warning/st.info na sidebar */
+[data-testid="stSidebar"] .stAlert {
+    background: rgba(255,255,255,0.06) !important;
+    border: 1px solid rgba(255,255,255,0.1) !important;
+}
+/* Divider na sidebar */
+[data-testid="stSidebar"] hr {
+    border-color: rgba(255,255,255,0.1) !important;
 }
 
 /* ── Tabs ─────────────────────────────────────────────── */
@@ -361,31 +395,107 @@ def section(icon: str, title: str):
 
 # --- 5. SIDEBAR ---
 with st.sidebar:
-    st.image("https://img.icons8.com/fluency/96/shield.png", width=60)
-    st.title("LicitA-IA Control")
-    st.markdown("---")
+    # ── Logo + Brand ──────────────────────────────────────
+    st.markdown("""
+    <div style="display:flex; align-items:center; gap:12px; padding:8px 0 20px 0;">
+        <img src="https://img.icons8.com/fluency/96/shield.png"
+             style="width:38px; height:38px; flex-shrink:0;" />
+        <div>
+            <div style="font-size:17px; font-weight:800; color:#ffffff; line-height:1.1;">
+                LicitA-IA
+            </div>
+            <div style="font-size:9px; font-weight:700; letter-spacing:0.14em;
+                        color:rgba(255,255,255,0.45); text-transform:uppercase;">
+                Intelligence Unit
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
+    # ── API Key ───────────────────────────────────────────
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else ""
     if not api_key:
-        api_key = st.text_input("Anthropic API Key (Claude)", type="password",
+        api_key = st.text_input("Anthropic API Key", type="password",
                                 placeholder="sk-ant-...")
-    if api_key:
-        st.success("✅ Motor: Claude Sonnet ativo")
-    else:
-        st.warning("⚠️ Insira a API Key para ativar o motor")
 
-    st.markdown("---")
-    empresa_nome = st.session_state.empresa["razao_social"] or "Aguardando Setup"
-    st.info(f"🏢 **Empresa Ativa:**\n{empresa_nome}")
+    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
-    st.markdown("---")
-    st.caption("Sensibilidade configurada para a Lei 14.133/21.")
+    # ── Empresa Ativa ─────────────────────────────────────
+    e = st.session_state.empresa
+    nome     = e["razao_social"]    or "Aguardando Setup"
+    capital  = e["capital_social"]
+    certs    = e["certificacoes"]
 
-    if st.button("🗑️ Limpar Todos os Resultados"):
+    st.markdown(f"""
+    <div style="margin-bottom:20px;">
+        <div style="font-size:9px; font-weight:700; letter-spacing:0.12em;
+                    color:rgba(255,255,255,0.35); text-transform:uppercase;
+                    margin-bottom:8px;">Empresa Ativa</div>
+        <div style="font-size:14px; font-weight:700; color:#ffffff;
+                    margin-bottom:4px;">{nome}</div>
+        <div style="font-size:12px; color:rgba(255,255,255,0.5);
+                    margin-bottom:6px;">Capital: R$ {capital:,.0f}</div>
+        <div style="font-size:11px; color:#4da6ff;">
+            {" · ".join(certs) if certs else "—"}
+        </div>
+    </div>
+    <hr style="border:none; border-top:1px solid rgba(255,255,255,0.08); margin:0 0 20px 0;" />
+    """, unsafe_allow_html=True)
+
+    # ── Status do Sistema ─────────────────────────────────
+    motor_status = "Ativo" if api_key else "Aguardando Key"
+    motor_cor    = "#52c41a" if api_key else "#faad14"
+    st.markdown(f"""
+    <div style="margin-bottom:20px;">
+        <div style="font-size:9px; font-weight:700; letter-spacing:0.12em;
+                    color:rgba(255,255,255,0.35); text-transform:uppercase;
+                    margin-bottom:10px;">Status do Sistema</div>
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:7px;">
+            <span style="width:8px; height:8px; border-radius:50%;
+                         background:#52c41a; display:inline-block; flex-shrink:0;"></span>
+            <span style="font-size:12px; color:rgba(255,255,255,0.75);">
+                PNCP Link: <b style="color:#fff;">Ativo</b>
+            </span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:7px;">
+            <span style="width:8px; height:8px; border-radius:50%;
+                         background:{motor_cor}; display:inline-block; flex-shrink:0;"></span>
+            <span style="font-size:12px; color:rgba(255,255,255,0.75);">
+                Motor Jurídico: <b style="color:#fff;">v2.0</b>
+            </span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+            <span style="width:8px; height:8px; border-radius:50%;
+                         background:#52c41a; display:inline-block; flex-shrink:0;"></span>
+            <span style="font-size:12px; color:rgba(255,255,255,0.75);">
+                Foco: <b style="color:#fff;">Lei 14.133/21</b>
+            </span>
+        </div>
+    </div>
+    <hr style="border:none; border-top:1px solid rgba(255,255,255,0.08); margin:0 0 16px 0;" />
+    """, unsafe_allow_html=True)
+
+    if st.button("🗑️ Limpar Resultados"):
         for k in ["resultado_auditoria", "resultado_cacador",
                   "resultado_juridico", "resultado_espiao"]:
             st.session_state[k] = None
         st.rerun()
+
+    # ── Rodapé ────────────────────────────────────────────
+    st.markdown("""
+    <div style="position:fixed; bottom:0; left:0; width:245px;
+                padding:16px 20px; border-top:1px solid rgba(255,255,255,0.08);">
+        <div style="font-size:11.5px; color:rgba(255,255,255,0.55); line-height:1.6;
+                    margin-bottom:10px;">
+            Sistema especializado na <b style="color:#fff;">Nova Lei de Licitações (14.133)</b>.
+            Identifica cláusulas restritivas e exigências de habilitação críticas.
+        </div>
+        <div style="font-size:10px; color:rgba(255,255,255,0.3);">
+            Desenvolvido para: Unidade de Inteligência
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
 
 # --- 6. ABAS ---
 tabs = st.tabs([
