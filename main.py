@@ -355,15 +355,16 @@ def section(icon: str, title: str):
 st.markdown("""
 <div style="background:var(--secondary-background-color);
             border-bottom:1px solid rgba(128,128,128,0.15);
-            padding:16px 32px; margin-bottom:8px;
+            padding:18px 32px; margin-bottom:8px;
             box-shadow:0 1px 4px rgba(0,0,0,0.06);
-            display:flex; align-items:center; gap:12px;">
-    <span style="font-size:20px;">🛡️</span>
+            display:flex; align-items:center; gap:16px;">
+    <img src="https://img.icons8.com/fluency/96/shield.png"
+         style="width:48px; height:48px; flex-shrink:0;" />
     <div>
-        <div style="font-size:17px; font-weight:700; color:#096dd9; line-height:1.2;">
+        <div style="font-size:22px; font-weight:700; color:#096dd9; line-height:1.2;">
             LicitA-IA: Intelligence Unit
         </div>
-        <div style="font-size:12px; color:var(--text-color); opacity:0.45; font-weight:500;">
+        <div style="font-size:13px; color:var(--text-color); opacity:0.5; font-weight:500; margin-top:2px;">
             Auditoria, Matching e Espionagem Competitiva em Tempo Real.
         </div>
     </div>
@@ -404,7 +405,7 @@ with tab_perfil:
     </div>""", unsafe_allow_html=True)
 
     # Card CNPJ
-    st.markdown('<div class="pcard">', unsafe_allow_html=True)
+
     st.markdown("**Pesquisa Rápida por CNPJ**")
     cc1, cc2 = st.columns([4, 1])
     with cc1:
@@ -438,10 +439,8 @@ with tab_perfil:
                         st.error(f"Erro de conexão: {e}")
             else:
                 st.warning("Digite um CNPJ com 14 dígitos.")
-    st.markdown('</div>', unsafe_allow_html=True)
 
-    # Card Dados
-    st.markdown('<div class="pcard">', unsafe_allow_html=True)
+    st.divider()
     section("🏛️", "Verifique e Complete as Informações")
     f1, f2 = st.columns(2)
     with f1:
@@ -497,7 +496,7 @@ with tab_perfil:
             "atestados":         atestados,
         })
         st.success("✅ Perfil salvo com sucesso! O motor de auditoria está calibrado.")
-    st.markdown('</div>', unsafe_allow_html=True)
+
 
 
 # ══════════════════════════════════════════
@@ -515,7 +514,7 @@ with tab_auditoria:
     elif not api_key:
         st.warning("Insira sua API Key para ativar o motor de IA.")
     else:
-        st.markdown('<div class="pcard">', unsafe_allow_html=True)
+    
         section("📄", "Upload do Edital")
         edital_file = st.file_uploader("Faça upload do edital em PDF",
                                        type="pdf", key="auditoria",
@@ -548,7 +547,7 @@ Responda APENAS com JSON válido, sem markdown:
                     raw  = chamar_claude(client, system, user, max_tokens=4096)
                     st.session_state.resultado_auditoria = parse_json(raw)
                     status.update(label="Auditoria concluída!", state="complete", expanded=False)
-        st.markdown('</div>', unsafe_allow_html=True)
+    
 
         if st.session_state.resultado_auditoria:
             res      = st.session_state.resultado_auditoria
@@ -591,7 +590,7 @@ with tab_cacador:
     if not api_key:
         st.warning("Insira sua API Key para ativar o Caçador.")
     else:
-        st.markdown('<div class="pcard">', unsafe_allow_html=True)
+    
         section("🔎", "Critérios de Busca")
         c1, c2 = st.columns(2)
         with c1:
@@ -632,7 +631,7 @@ Responda SOMENTE com JSON válido:
                 st.session_state.resultado_cacador = parse_json(
                     chamar_claude(client, system, user, max_tokens=3000)
                 )
-        st.markdown('</div>', unsafe_allow_html=True)
+    
 
         if st.session_state.resultado_cacador:
             res  = st.session_state.resultado_cacador
@@ -668,7 +667,7 @@ with tab_juridico:
     if not api_key:
         st.warning("Insira sua API Key para usar o Advogado AI.")
     else:
-        st.markdown('<div class="pcard">', unsafe_allow_html=True)
+    
         section("📝", "Configuração da Peça")
         tipo_peca = st.selectbox("Tipo de Peça", [
             "Impugnação de Edital",
@@ -708,7 +707,7 @@ Inclua: cabeçalho, qualificação das partes, dos fatos, fundamentos jurídicos
                             f"Data: {data_sessao}\n\nFundamento:\n{fundamento}")
                     peca = chamar_claude(client, system, user, max_tokens=4096)
                     st.session_state.resultado_juridico = {"tipo": tipo_peca, "texto": peca}
-        st.markdown('</div>', unsafe_allow_html=True)
+    
 
         if st.session_state.resultado_juridico:
             res = st.session_state.resultado_juridico
@@ -738,7 +737,7 @@ with tab_espiao:
     if not api_key:
         st.warning("Insira sua API Key para usar o Espião.")
     else:
-        st.markdown('<div class="pcard">', unsafe_allow_html=True)
+    
         section("🔎", "Identificação do Concorrente")
         e1, e2 = st.columns([3, 1])
         with e1:
@@ -771,9 +770,9 @@ with tab_espiao:
             cc2.metric("Capital Social", f"R$ {float(d.get('capital_social') or 0):,.0f}")
             cc3.metric("Porte",          d.get("porte","N/A"))
             cc4.metric("Situação",       d.get("descricao_situacao_cadastral","N/A"))
-        st.markdown('</div>', unsafe_allow_html=True)
+    
 
-        st.markdown('<div class="pcard">', unsafe_allow_html=True)
+    
         section("📋", "Inteligência Competitiva")
         historico = st.text_area("Histórico e comportamento do concorrente",
                                  placeholder=(
@@ -809,7 +808,7 @@ Responda SOMENTE com JSON válido:
                     st.session_state.resultado_espiao = parse_json(
                         chamar_claude(client, system, user, max_tokens=3000)
                     )
-        st.markdown('</div>', unsafe_allow_html=True)
+    
 
         if st.session_state.resultado_espiao:
             res = st.session_state.resultado_espiao
@@ -860,7 +859,7 @@ with tab_vault:
         if "vault" not in st.session_state:
             st.session_state.vault = {c: {"validade": "", "status": "Não cadastrada"} for c in CERTIDOES}
 
-        st.markdown('<div class="pcard">', unsafe_allow_html=True)
+    
         section("🗂️", "Painel de Certidões")
 
         v1, v2, v3 = st.columns(3)
@@ -905,5 +904,3 @@ with tab_vault:
                            f"e indique riscos de inabilitação, urgências de renovação e boas práticas:\n{resumo}")
                 analise = chamar_claude(client, system, user, max_tokens=1500)
                 risk_card("Análise Documental", "DIAGNÓSTICO DO VAULT", analise)
-
-        st.markdown('</div>', unsafe_allow_html=True)
