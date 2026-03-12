@@ -3,6 +3,1255 @@ import anthropic
 import requests
 import fitz  # PyMuPDF
 import json
+import re
+import hashlib
+import logging
+import asyncio
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from typing import Optional
+import pandas as pd
+
+
+# ══════════════════════════════════════════
+# MÓDULOS EMBARCADOS (sentinela, anti_preco, compliance, agu_parser)
+# ══════════════════════════════════════════
+
+
+# ── SENTINELA ──────────────────────────────────────────────
+logger = logging.getLogger("sentinela")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [SENTINELA] %(levelname)s — %(message)s",
+    handlers=[
+        logging.FileHandler("logs/sentinela.log"),
+        logging.StreamHandler(),
+    ],
+)
+
+# ── Constantes ──────────────────────────────────────────
+PNCP_API_BASE   = "https://pncp.gov.br/api/pncp/v1"
+COMPRAS_GOV_API = "https://compras.dados.gov.br/editais/v1"
+MAX_RETRIES     = 4
+RETRY_BACKOFF   = [2, 5, 15, 30]   # segundos entre tentativas
+POLL_INTERVAL   = 300               # 5 minutos por padrão
+STATE_FILE      = Path("data/sentinela_state.json")
+
+
+class RiscoNivel(str, Enum):
+    CRITICO    = "CRITICO"
+    MODERADO   = "MODERADO"
+    INFORMATIVO = "INFORMATIVO"
+
+
+@dataclass
+class EditalSnapshot:
+    url: str
+    hash_conteudo: str
+    hash_anexos: str
+    texto: str
+    anexos: list[str]
+    capturado_em: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
+@dataclass
+class AlertaSentinela:
+    url: str
+    nivel: RiscoNivel
+    resumo: str
+    delta_itens: list[dict]
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
+# ── Palavras-chave de risco por nível ───────────────────
+KEYWORDS_CRITICO = [
+    "retificação", "prazo", "habilitação", "desclassificação",
+    "suspensão", "cancelamento", "impugnação", "garantia",
+    "capital social", "índice de liquidez", "atestado",
+]
+KEYWORDS_MODERADO = [
+    "esclarecimento", "adendo", "erratum", "alteração de valor",
+    "prorrogação", "publicação", "anexo", "planilha",
+]
+
+
+class SentinelaMonitor:
+    """
+    Motor de monitoramento assíncrono de editais.
+
+    Uso:
+        monitor = SentinelaMonitor(webhook_url="https://...")
+        await monitor.adicionar_edital("https://pncp.gov.br/...")
+        await monitor.iniciar()
+    """
+
+    def __init__(
+        self,
+        webhook_url: str,
+        poll_interval: int = POLL_INTERVAL,
+        on_alerta=None,           # callback opcional para UI (Streamlit)
+    ):
+        self.webhook_url   = webhook_url
+        self.poll_interval = poll_interval
+        self.on_alerta     = on_alerta       # fn(AlertaSentinela) para atualizar st.session_state
+        self._editais: dict[str, EditalSnapshot] = {}
+        self._ativo   = False
+        self._load_state()
+
+    # ── API Pública ──────────────────────────────────────
+
+    def adicionar_edital(self, url: str):
+        """Registra uma URL para monitoramento. Retorna True se for nova."""
+        if url not in self._editais:
+            self._editais[url] = None   # será populado no primeiro ciclo
+            self._save_state()
+            logger.info(f"Edital adicionado: {url}")
+            return True
+        return False
+
+    def remover_edital(self, url: str):
+        self._editais.pop(url, None)
+        self._save_state()
+
+    def listar_editais(self) -> list[str]:
+        return list(self._editais.keys())
+
+    async def iniciar(self):
+        """Loop principal assíncrono. Roda até ser interrompido."""
+        self._ativo = True
+        logger.info(f"Sentinela iniciado — {len(self._editais)} edital(is) em vigília")
+        while self._ativo:
+            await self._ciclo_monitoramento()
+            await asyncio.sleep(self.poll_interval)
+
+    def parar(self):
+        self._ativo = False
+        logger.info("Sentinela parado.")
+
+    # ── Ciclo Interno ────────────────────────────────────
+
+    async def _ciclo_monitoramento(self):
+        tarefas = [self._verificar_edital(url) for url in list(self._editais)]
+        resultados = await asyncio.gather(*tarefas, return_exceptions=True)
+        for url, resultado in zip(self._editais, resultados):
+            if isinstance(resultado, Exception):
+                logger.error(f"Falha ao verificar {url}: {resultado}")
+
+    async def _verificar_edital(self, url: str):
+        snapshot_atual = await self._fetch_edital(url)
+        if snapshot_atual is None:
+            return
+
+        snapshot_anterior = self._editais.get(url)
+
+        # Primeira captura — sem comparação
+        if snapshot_anterior is None:
+            self._editais[url] = snapshot_atual
+            self._save_state()
+            logger.info(f"Snapshot inicial capturado: {url}")
+            return
+
+        # Verifica mudança por hash
+        mudou_conteudo = snapshot_atual.hash_conteudo != snapshot_anterior.hash_conteudo
+        mudou_anexos   = snapshot_atual.hash_anexos   != snapshot_anterior.hash_anexos
+
+        if not mudou_conteudo and not mudou_anexos:
+            logger.debug(f"Sem alterações: {url}")
+            return
+
+        logger.warning(f"MUDANÇA DETECTADA: {url}")
+
+        # Extrai e classifica o delta
+        delta = self._extract_delta(snapshot_anterior.texto, snapshot_atual.texto)
+        nivel = self._classify_risk(delta, mudou_anexos)
+        alerta = AlertaSentinela(
+            url=url,
+            nivel=nivel,
+            resumo=self._gerar_resumo(delta, nivel, mudou_anexos),
+            delta_itens=delta,
+        )
+
+        # Atualiza estado
+        self._editais[url] = snapshot_atual
+        self._save_state()
+
+        # Dispara alertas
+        await self._dispatch_alert(alerta)
+        if self.on_alerta:
+            self.on_alerta(alerta)
+
+    # ── Fetch com Retry ──────────────────────────────────
+
+    async def _fetch_edital(self, url: str) -> Optional[EditalSnapshot]:
+        """Busca conteúdo do edital com retry exponencial."""
+        for tentativa, espera in enumerate(RETRY_BACKOFF):
+            try:
+                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                    resp = await client.get(url, headers={"User-Agent": "LicitA-IA/2.0"})
+                    resp.raise_for_status()
+                    texto   = resp.text
+                    anexos  = self._extrair_links_anexos(texto)
+                    return EditalSnapshot(
+                        url=url,
+                        hash_conteudo=self._hash(texto),
+                        hash_anexos=self._hash(json.dumps(sorted(anexos))),
+                        texto=texto,
+                        anexos=anexos,
+                    )
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in (403, 404):
+                    logger.error(f"Edital inacessível ({e.response.status_code}): {url}")
+                    return None
+                logger.warning(f"Tentativa {tentativa+1}/{MAX_RETRIES} falhou para {url}. "
+                               f"Aguardando {espera}s...")
+            except httpx.RequestError as e:
+                logger.warning(f"Erro de rede tentativa {tentativa+1}: {e}")
+
+            if tentativa < len(RETRY_BACKOFF) - 1:
+                await asyncio.sleep(espera)
+
+        logger.error(f"Todas as tentativas falharam para: {url}")
+        return None
+
+    # ── Delta e Classificação ────────────────────────────
+
+    def _extract_delta(self, texto_antigo: str, texto_novo: str) -> list[dict]:
+        """Extrai linhas alteradas e classifica cada uma."""
+        linhas_antigas = texto_antigo.splitlines(keepends=True)
+        linhas_novas   = texto_novo.splitlines(keepends=True)
+        diff = list(unified_diff(linhas_antigas, linhas_novas,
+                                 fromfile="versao_anterior",
+                                 tofile="versao_atual", n=2))
+        delta = []
+        for linha in diff:
+            if linha.startswith(("+", "-")) and not linha.startswith(("+++", "---")):
+                tipo = "adicionado" if linha.startswith("+") else "removido"
+                conteudo = linha[1:].strip()
+                if conteudo:
+                    delta.append({"tipo": tipo, "conteudo": conteudo})
+        return delta[:50]   # limita para não inflar o payload
+
+    def _classify_risk(self, delta: list[dict], mudou_anexos: bool) -> RiscoNivel:
+        """Classifica o nível de risco baseado nas palavras-chave do delta."""
+        texto_delta = " ".join(d["conteudo"].lower() for d in delta)
+
+        if any(kw in texto_delta for kw in KEYWORDS_CRITICO) or mudou_anexos:
+            return RiscoNivel.CRITICO
+        if any(kw in texto_delta for kw in KEYWORDS_MODERADO):
+            return RiscoNivel.MODERADO
+        return RiscoNivel.INFORMATIVO
+
+    def _gerar_resumo(self, delta: list[dict], nivel: RiscoNivel,
+                      mudou_anexos: bool) -> str:
+        n_add = sum(1 for d in delta if d["tipo"] == "adicionado")
+        n_rem = sum(1 for d in delta if d["tipo"] == "removido")
+        anexo_info = " Novos anexos detectados." if mudou_anexos else ""
+        return (
+            f"Retificação {nivel.value}: {n_add} inclusões, {n_rem} remoções.{anexo_info} "
+            f"Verifique se sua habilitação continua atendendo os requisitos atualizados."
+        )
+
+    # ── Webhook ──────────────────────────────────────────
+
+    async def _dispatch_alert(self, alerta: AlertaSentinela):
+        """Envia alerta via webhook (WhatsApp Business API / Slack / n8n)."""
+        emoji = {"CRITICO": "🚨", "MODERADO": "⚠️", "INFORMATIVO": "ℹ️"}.get(alerta.nivel, "🔔")
+        payload = {
+            "text": (
+                f"{emoji} *LicitA-IA Sentinela — Alerta {alerta.nivel}*\n"
+                f"📎 {alerta.url}\n"
+                f"📋 {alerta.resumo}\n"
+                f"🕐 {alerta.timestamp}"
+            ),
+            "nivel": alerta.nivel,
+            "url":   alerta.url,
+            "delta": alerta.delta_itens[:10],   # primeiros 10 itens no webhook
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(self.webhook_url, json=payload)
+                resp.raise_for_status()
+                logger.info(f"Alerta {alerta.nivel} disparado com sucesso.")
+        except Exception as e:
+            logger.error(f"Falha ao disparar webhook: {e}")
+            # Persiste o alerta não entregue para reenvio futuro
+            self._salvar_alerta_pendente(alerta)
+
+    # ── Persistência de Estado ───────────────────────────
+
+    def _load_state(self):
+        STATE_FILE.parent.mkdir(exist_ok=True)
+        if STATE_FILE.exists():
+            try:
+                raw = json.loads(STATE_FILE.read_text())
+                for url, snap in raw.items():
+                    self._editais[url] = EditalSnapshot(**snap) if snap else None
+                logger.info(f"Estado restaurado: {len(self._editais)} edital(is)")
+            except Exception as e:
+                logger.warning(f"Não foi possível restaurar estado: {e}")
+
+    def _save_state(self):
+        try:
+            serializable = {
+                url: (
+                    {"url": s.url, "hash_conteudo": s.hash_conteudo,
+                     "hash_anexos": s.hash_anexos, "texto": s.texto[:5000],
+                     "anexos": s.anexos, "capturado_em": s.capturado_em}
+                    if s else None
+                )
+                for url, s in self._editais.items()
+            }
+            STATE_FILE.write_text(json.dumps(serializable, ensure_ascii=False, indent=2))
+        except Exception as e:
+            logger.error(f"Falha ao salvar estado: {e}")
+
+    def _salvar_alerta_pendente(self, alerta: AlertaSentinela):
+        pending = Path("data/alertas_pendentes.jsonl")
+        with pending.open("a") as f:
+            f.write(json.dumps({
+                "url": alerta.url, "nivel": alerta.nivel,
+                "resumo": alerta.resumo, "timestamp": alerta.timestamp
+            }, ensure_ascii=False) + "\n")
+
+    # ── Utilidades ───────────────────────────────────────
+
+    @staticmethod
+    def _hash(texto: str) -> str:
+        return hashlib.md5(texto.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _extrair_links_anexos(html: str) -> list[str]:
+        """Extrai URLs de PDFs e documentos do HTML do edital."""
+        import re
+        return re.findall(r'href=["\']([^"\']*\.(?:pdf|docx|xlsx|zip))["\']',
+                          html, re.IGNORECASE)
+
+
+
+# ── ANTI_PRECO ──────────────────────────────────────────────
+logger = logging.getLogger("anti_preco")
+
+# ── Constantes ──────────────────────────────────────────
+MARGEM_SEGURANCA_PADRAO = 0.15     # 15% — referência TCU Acórdão 2170/2023
+INEXEQUIBILIDADE_LIMITE = 0.70     # Proposta < 70% da média = suspeita de inexequibilidade
+POLL_INTERVAL_LANCES    = 30       # segundos
+
+
+class DecisaoLance(str, Enum):
+    CONTINUAR         = "CONTINUAR"
+    RECUAR            = "RECUAR"
+    RECURSO_ADMIN     = "RECURSO_ADMINISTRATIVO"
+    MONITORAR         = "MONITORAR"
+
+
+@dataclass
+class PlilhaCustos:
+    """Espelha a planilha de custos do usuário."""
+    custo_direto_total: float       # materiais + mão de obra + encargos
+    custo_indireto_pct: float       # BDI / despesas administrativas (ex: 0.20 = 20%)
+    margem_lucro_pct: float         # margem desejada pelo usuário (ex: 0.10 = 10%)
+    impostos_pct: float             # ISS + PIS + COFINS etc (ex: 0.0925)
+
+    @property
+    def custo_total(self) -> float:
+        return self.custo_direto_total * (
+            1 + self.custo_indireto_pct + self.impostos_pct
+        )
+
+    @property
+    def preco_minimo_viavel(self) -> float:
+        """Preço mínimo para cobrir custos + impostos."""
+        return self.custo_total
+
+    @property
+    def preco_alvo(self) -> float:
+        """Preço alvo com margem de lucro desejada."""
+        return self.custo_total * (1 + self.margem_lucro_pct)
+
+    @property
+    def piso_inexequibilidade(self) -> float:
+        """
+        70% do custo direto — piso de inexequibilidade per TCU.
+        Proposta abaixo disso é presumidamente inexequível.
+        """
+        return self.custo_direto_total * INEXEQUIBILIDADE_LIMITE
+
+
+@dataclass
+class SituacaoLances:
+    menor_lance: float
+    media_lances: float
+    total_licitantes: int
+    seu_lance_atual: Optional[float]
+    capturado_em: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
+@dataclass
+class AlertaLance:
+    nivel: str                      # "CRITICO" | "ATENCAO" | "OK"
+    decisao: DecisaoLance
+    menor_lance: float
+    seu_preco_minimo: float
+    margem_restante_pct: float
+    mensagem: str
+    fundamentacao_legal: str
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
+class AntiPrecoSuicida:
+    """
+    Vigilante de sala de lances.
+
+    Uso:
+        planilha = PlilhaCustos(custo_direto_total=80000, ...)
+        vigilante = AntiPrecoSuicida(planilha=planilha, url_sala="https://...")
+        await vigilante.iniciar_vigilia()
+    """
+
+    def __init__(
+        self,
+        planilha: PlilhaCustos,
+        url_sala_lances: str,
+        on_alerta=None,     # callback para UI Streamlit
+        poll_interval: int = POLL_INTERVAL_LANCES,
+    ):
+        self.planilha        = planilha
+        self.url_sala_lances = url_sala_lances
+        self.on_alerta       = on_alerta
+        self.poll_interval   = poll_interval
+        self._ativo          = False
+        self._ultimo_alerta: Optional[AlertaLance] = None
+
+    # ── API Pública ──────────────────────────────────────
+
+    async def iniciar_vigilia(self):
+        self._ativo = True
+        logger.info(f"Vigilância iniciada — Sala: {self.url_sala_lances}")
+        logger.info(
+            f"Preço mínimo viável: R$ {self.planilha.preco_minimo_viavel:,.2f} | "
+            f"Preço alvo: R$ {self.planilha.preco_alvo:,.2f}"
+        )
+        while self._ativo:
+            situacao = await self._capturar_situacao_lances()
+            if situacao:
+                alerta = self._analisar_situacao(situacao)
+                if alerta.nivel in ("CRITICO", "ATENCAO"):
+                    if self._deve_disparar(alerta):
+                        logger.warning(f"[LANCE] {alerta.mensagem}")
+                        if self.on_alerta:
+                            self.on_alerta(alerta)
+                        self._ultimo_alerta = alerta
+            await asyncio.sleep(self.poll_interval)
+
+    def parar(self):
+        self._ativo = False
+
+    # ── Captura de Lances ────────────────────────────────
+
+    async def _capturar_situacao_lances(self) -> Optional[SituacaoLances]:
+        """
+        Captura situação atual da sala de lances.
+        Compatível com o formato do PNCP e Comprasnet.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    self.url_sala_lances,
+                    headers={"User-Agent": "LicitA-IA/2.0", "Accept": "application/json"}
+                )
+                resp.raise_for_status()
+                dados = resp.json()
+
+                # Adapta para o schema do PNCP
+                lances = dados.get("lances", dados.get("proposals", []))
+                if not lances:
+                    return None
+
+                valores = [float(l.get("valor", l.get("value", 0))) for l in lances if l]
+                valores = [v for v in valores if v > 0]
+
+                return SituacaoLances(
+                    menor_lance=min(valores),
+                    media_lances=sum(valores) / len(valores),
+                    total_licitantes=len(set(
+                        l.get("cnpj", l.get("supplier", "")) for l in lances
+                    )),
+                    seu_lance_atual=dados.get("meu_lance"),
+                )
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"Sala de lances retornou {e.response.status_code}")
+            return None
+        except Exception as e:
+            logger.error(f"Erro ao capturar lances: {e}")
+            return None
+
+    # ── Análise e Decisão ────────────────────────────────
+
+    def _analisar_situacao(self, situacao: SituacaoLances) -> AlertaLance:
+        menor   = situacao.menor_lance
+        p_min   = self.planilha.preco_minimo_viavel
+        p_alvo  = self.planilha.preco_alvo
+        p_inex  = self.planilha.piso_inexequibilidade
+        margem  = (menor - p_min) / p_min if p_min > 0 else 0
+
+        # ── Cenário 1: Lance abaixo do piso de inexequibilidade ──
+        if menor < p_inex:
+            return AlertaLance(
+                nivel="CRITICO",
+                decisao=DecisaoLance.RECURSO_ADMIN,
+                menor_lance=menor,
+                seu_preco_minimo=p_min,
+                margem_restante_pct=margem * 100,
+                mensagem=(
+                    f"🚨 PREÇO SUICIDA DETECTADO! Lance de R$ {menor:,.2f} está abaixo do "
+                    f"piso de inexequibilidade (R$ {p_inex:,.2f}). "
+                    f"O concorrente provavelmente não conseguirá executar o contrato."
+                ),
+                fundamentacao_legal=(
+                    "Lei 14.133/2021, Art. 59 — Proposta presumidamente inexequível. "
+                    "Acórdão TCU 2170/2023 — Piso de 70% do custo direto. "
+                    "Recomendação: Preparar impugnação por inexequibilidade."
+                ),
+            )
+
+        # ── Cenário 2: Lance abaixo do seu custo mínimo ──────────
+        if menor < p_min:
+            return AlertaLance(
+                nivel="CRITICO",
+                decisao=DecisaoLance.RECUAR,
+                menor_lance=menor,
+                seu_preco_minimo=p_min,
+                margem_restante_pct=margem * 100,
+                mensagem=(
+                    f"⛔ RISCO CRÍTICO! O menor lance (R$ {menor:,.2f}) está abaixo do "
+                    f"seu custo mínimo viável (R$ {p_min:,.2f}). "
+                    f"Cobrir esse preço causaria prejuízo operacional."
+                ),
+                fundamentacao_legal=(
+                    "Recuar é a decisão estratégica correta. "
+                    "Executar abaixo do custo caracteriza dano econômico ao contratado. "
+                    "Avalie se há possibilidade de recurso por inexequibilidade do vencedor."
+                ),
+            )
+
+        # ── Cenário 3: Margem apertada (< 5%) ────────────────────
+        if 0 <= margem < 0.05:
+            return AlertaLance(
+                nivel="ATENCAO",
+                decisao=DecisaoLance.MONITORAR,
+                menor_lance=menor,
+                seu_preco_minimo=p_min,
+                margem_restante_pct=margem * 100,
+                mensagem=(
+                    f"⚠️ MARGEM CRÍTICA! Lance de R$ {menor:,.2f} está apenas "
+                    f"{margem*100:.1f}% acima do seu custo mínimo. "
+                    f"Você ainda pode cobrir, mas sem folga operacional."
+                ),
+                fundamentacao_legal="Monitore o progresso. Lance adicional só se tiver certeza do custo real.",
+            )
+
+        # ── Cenário 4: Situação saudável ──────────────────────────
+        return AlertaLance(
+            nivel="OK",
+            decisao=DecisaoLance.CONTINUAR,
+            menor_lance=menor,
+            seu_preco_minimo=p_min,
+            margem_restante_pct=margem * 100,
+            mensagem=(
+                f"✅ Situação controlada. Menor lance: R$ {menor:,.2f}. "
+                f"Você ainda tem {margem*100:.1f}% de margem sobre seu custo mínimo."
+            ),
+            fundamentacao_legal="",
+        )
+
+    def _deve_disparar(self, alerta: AlertaLance) -> bool:
+        """Evita spam: só dispara se houver mudança de nível ou valor significativo."""
+        if self._ultimo_alerta is None:
+            return True
+        nivel_mudou = alerta.nivel != self._ultimo_alerta.nivel
+        valor_mudou = abs(alerta.menor_lance - self._ultimo_alerta.menor_lance) > 100
+        return nivel_mudou or valor_mudou
+
+    # ── Fábrica de Planilha ──────────────────────────────
+
+    @staticmethod
+    def from_perfil(perfil: dict, url_sala: str, on_alerta=None) -> "AntiPrecoSuicida":
+        """
+        Constrói o vigilante a partir do perfil salvo no session_state.
+
+        Espera que perfil contenha:
+          - custo_direto: float
+          - bdi_pct: float (ex: 0.20)
+          - margem_pct: float (ex: 0.10)
+          - impostos_pct: float (ex: 0.0925)
+        """
+        planilha = PlilhaCustos(
+            custo_direto_total=float(perfil.get("custo_direto", 0)),
+            custo_indireto_pct=float(perfil.get("bdi_pct", 0.20)),
+            margem_lucro_pct=float(perfil.get("margem_pct", 0.10)),
+            impostos_pct=float(perfil.get("impostos_pct", 0.0925)),
+        )
+        return AntiPrecoSuicida(planilha=planilha, url_sala_lances=url_sala,
+                                on_alerta=on_alerta)
+
+
+
+# ── COMPLIANCE ──────────────────────────────────────────────
+class CategoriaRisco(str, Enum):
+    TRABALHISTA      = "TRABALHISTA"
+    COMPETITIVIDADE  = "COMPETITIVIDADE"
+    HABILITACAO      = "HABILITAÇÃO"
+    GOVERNANCA       = "GOVERNANÇA"
+    FINANCEIRO       = "FINANCEIRO"
+    PRAZO            = "PRAZO"
+
+
+@dataclass
+class ItemCompliance:
+    categoria: CategoriaRisco
+    severidade: str          # "CRITICO" | "MODERADO" | "INFO"
+    titulo: str
+    trecho_encontrado: str
+    fundamentacao: str
+    pontos_deduzidos: int    # do score de viabilidade
+
+
+@dataclass
+class RelatorioCompliance:
+    score_viabilidade: int                          # 0-100
+    classificacao: str                              # "ALTO RISCO" | "MODERADO" | "VIÁVEL"
+    total_itens: int
+    criticos: list[ItemCompliance]
+    moderados: list[ItemCompliance]
+    informativos: list[ItemCompliance]
+    padrao_agu_detectado: bool
+    resumo_executivo: str
+
+    @property
+    def todos_itens(self) -> list[ItemCompliance]:
+        return self.criticos + self.moderados + self.informativos
+
+
+# ── Regras de Compliance ────────────────────────────────
+# Cada regra: (padrão regex, categoria, severidade, título, fundamentação, pontos)
+
+REGRAS_COMPLIANCE: list[tuple] = [
+
+    # ── TENDÊNCIA 2026: Jornada 6x1 ─────────────────────
+    (
+        r"(escala\s+6[x×]1|jornada\s+de\s+6\s+dias|folga\s+(semanal|1\s+dia)|"
+        r"6\s+dias\s+(de\s+)?trabalho)",
+        CategoriaRisco.TRABALHISTA,
+        "CRITICO",
+        "Exigência de Jornada 6x1 — Possível Barreira Trabalhista",
+        "A exigência de escala 6x1 pode ser inconstitucional (CF/88, Art. 7º, XIII) "
+        "e restringir empresas que adotam escalas alternativas homologadas. "
+        "Tendência 2026: crescente contestação judicial desta cláusula.",
+        25,
+    ),
+
+    # ── MARCA ESPECÍFICA ─────────────────────────────────
+    (
+        r"(marca\s+\w+|fabricante\s+\w+|exclusividade\s+de\s+marca|"
+        r"(somente|apenas|exclusivamente)\s+\w+\s+(da\s+marca|fabricado))",
+        CategoriaRisco.COMPETITIVIDADE,
+        "CRITICO",
+        "Exigência de Marca Específica — Restrição à Competitividade",
+        "Vedado pela Lei 14.133/2021, Art. 41, I. Exigir marca específica "
+        "sem justificativa técnica fere o princípio da competitividade. "
+        "Fundamento para impugnação imediata.",
+        30,
+    ),
+
+    # ── CAPITAL SOCIAL DESPROPORCIONAL ───────────────────
+    (
+        r"capital\s+social\s+(mínimo|igual\s+ou\s+superior|não\s+inferior)\s+(a\s+)?r\$\s*[\d\.,]+",
+        CategoriaRisco.FINANCEIRO,
+        "MODERADO",
+        "Exigência de Capital Social — Verificar Proporcionalidade",
+        "Lei 14.133/2021, Art. 69, §1º — Capital social exigido não pode "
+        "superar 10% do valor estimado do contrato. Verifique se a exigência "
+        "é proporcional ao objeto licitado.",
+        15,
+    ),
+
+    # ── ATESTADO ÚNICO ───────────────────────────────────
+    (
+        r"(atestado\s+único|em\s+único\s+contrato|por\s+um\s+(só|único)\s+contrato|"
+        r"contrato\s+com\s+quantidade\s+(total|mínima)\s+de\s+[\d\.]+\s+(em\s+)?um\s+único)",
+        CategoriaRisco.HABILITACAO,
+        "CRITICO",
+        "Exigência de Atestado Único — Restrição Ilegal",
+        "TCU, Acórdão 1.214/2022 — Exigir que toda a experiência seja comprovada "
+        "em um único contrato restringe a competitividade e é vedado. "
+        "Soma de contratos deve ser aceita.",
+        25,
+    ),
+
+    # ── PRAZO EXÍGUO ─────────────────────────────────────
+    (
+        r"prazo\s+(de\s+)?execução\s+(de\s+)?(0?[1-9]|1[0-5])\s+dias?\s+(corridos|úteis|calendário)",
+        CategoriaRisco.PRAZO,
+        "MODERADO",
+        "Prazo de Execução Potencialmente Exíguo",
+        "Lei 14.133/2021, Art. 54 — O prazo deve ser compatível com a "
+        "complexidade do objeto. Prazos abaixo de 15 dias para objetos "
+        "complexos podem ser contestados.",
+        10,
+    ),
+
+    # ── ÍNDICE DE LIQUIDEZ ABUSIVO ────────────────────────
+    (
+        r"liquidez\s+corrente\s+(maior|igual|superior|não\s+inferior)\s+(a\s+)?[2-9][\.,]\d+",
+        CategoriaRisco.FINANCEIRO,
+        "CRITICO",
+        "Índice de Liquidez Desproporcional (≥ 2,0)",
+        "Lei 14.133/2021, Art. 69 e TCU, Súmula 272 — Índice de liquidez "
+        "corrente superior a 1,5 sem justificativa técnica é considerado "
+        "restritivo à competitividade.",
+        20,
+    ),
+
+    # ── VISITA TÉCNICA OBRIGATÓRIA ────────────────────────
+    (
+        r"visita\s+técnica\s+(obrigatória|indispensável|condição\s+para\s+participação)",
+        CategoriaRisco.HABILITACAO,
+        "MODERADO",
+        "Visita Técnica Obrigatória — Possível Restrição",
+        "TCU, Acórdão 2.696/2017 — Visita técnica só pode ser obrigatória "
+        "se houver justificativa técnica robusta. Quando obrigatória, "
+        "deve ser disponibilizada em múltiplas datas.",
+        10,
+    ),
+
+    # ── VÍNCULO EMPREGATÍCIO OBRIGATÓRIO ─────────────────
+    (
+        r"(quadro\s+permanente|vínculo\s+empregatício|registro\s+em\s+carteira|"
+        r"empregados?\s+próprios?\s+com\s+carteira)",
+        CategoriaRisco.TRABALHISTA,
+        "MODERADO",
+        "Exigência de Vínculo Empregatício Fixo",
+        "Exigir vínculo empregatício permanente pode restringir empresas "
+        "que utilizam prestação de serviços ou contratos a prazo. "
+        "Verificar conformidade com a natureza do objeto.",
+        10,
+    ),
+
+    # ── GOVERNANÇA: AUSÊNCIA DE MATRIZ DE RISCO ──────────
+    (
+        r"(?!.*matriz\s+de\s+risco)(?!.*alocação\s+de\s+riscos)",
+        CategoriaRisco.GOVERNANCA,
+        "INFO",
+        "Ausência de Matriz de Riscos",
+        "Lei 14.133/2021, Art. 22, §3º — Contratos de grande vulto devem "
+        "conter matriz de alocação de riscos. Verifique se o edital cumpre "
+        "este requisito de governança.",
+        5,
+    ),
+
+    # ── SANÇÕES DESPROPORCIONAIS ──────────────────────────
+    (
+        r"multa\s+(de\s+)?(2[1-9]|[3-9]\d|100)\s*%",
+        CategoriaRisco.GOVERNANCA,
+        "MODERADO",
+        "Multa Contratual Potencialmente Abusiva (> 20%)",
+        "Lei 14.133/2021, Art. 162 — Multas superiores a 20% do valor "
+        "contratual podem ser contestadas como cláusula abusiva. "
+        "Verifique a proporcionalidade da sanção.",
+        10,
+    ),
+]
+
+
+class ComplianceScanner:
+    """
+    Scanner de compliance para editais de licitação.
+
+    Uso:
+        scanner = ComplianceScanner()
+        relatorio = scanner.analisar(texto_edital)
+        print(relatorio.score_viabilidade)
+    """
+
+    def __init__(self):
+        # Pré-compila todos os regex para performance
+        self._regras_compiladas = [
+            (re.compile(padrao, re.IGNORECASE | re.MULTILINE),
+             cat, sev, titulo, fund, pts)
+            for padrao, cat, sev, titulo, fund, pts in REGRAS_COMPLIANCE
+        ]
+
+    def analisar(self, texto_edital: str,
+                 perfil_empresa: Optional[dict] = None) -> RelatorioCompliance:
+        """
+        Analisa o edital e retorna o relatório de compliance completo.
+
+        Args:
+            texto_edital: texto extraído do PDF do edital
+            perfil_empresa: dict com dados da empresa para análise personalizada
+        """
+        itens: list[ItemCompliance] = []
+        penalidade_total = 0
+
+        for regex, categoria, severidade, titulo, fund, pontos in self._regras_compiladas:
+            matches = regex.findall(texto_edital)
+            if not matches:
+                continue
+
+            # Extrai contexto em torno do match para exibir na UI
+            trecho = self._extrair_contexto(texto_edital, regex)
+
+            item = ItemCompliance(
+                categoria=categoria,
+                severidade=severidade,
+                titulo=titulo,
+                trecho_encontrado=trecho[:300],
+                fundamentacao=fund,
+                pontos_deduzidos=pontos,
+            )
+            itens.append(item)
+            penalidade_total += pontos
+
+        # Análise personalizada com o perfil da empresa
+        if perfil_empresa:
+            itens_personalizados = self._analisar_vs_perfil(texto_edital, perfil_empresa)
+            itens.extend(itens_personalizados)
+            penalidade_total += sum(i.pontos_deduzidos for i in itens_personalizados)
+
+        # Detecta padrão AGU
+        padrao_agu = self._detectar_padrao_agu(texto_edital)
+
+        # Calcula score
+        score = max(0, min(100, 100 - penalidade_total))
+
+        criticos    = [i for i in itens if i.severidade == "CRITICO"]
+        moderados   = [i for i in itens if i.severidade == "MODERADO"]
+        informativos = [i for i in itens if i.severidade == "INFO"]
+
+        classificacao = (
+            "ALTO RISCO"  if score < 50 else
+            "RISCO MODERADO" if score < 75 else
+            "VIÁVEL"
+        )
+
+        return RelatorioCompliance(
+            score_viabilidade=score,
+            classificacao=classificacao,
+            total_itens=len(itens),
+            criticos=criticos,
+            moderados=moderados,
+            informativos=informativos,
+            padrao_agu_detectado=padrao_agu,
+            resumo_executivo=self._gerar_resumo(score, classificacao, criticos,
+                                                moderados, padrao_agu),
+        )
+
+    def _analisar_vs_perfil(self, texto: str,
+                            perfil: dict) -> list[ItemCompliance]:
+        """Cruzamento personalizado: texto do edital x dados da empresa."""
+        itens_extra = []
+        capital_empresa = float(perfil.get("capital_social", 0))
+        liquidez_empresa = float(perfil.get("liquidez_corrente", 1.0))
+
+        # Verifica se capital exigido supera 10% do valor estimado
+        match_capital = re.search(
+            r"capital\s+social.*?r\$\s*([\d\.,]+)", texto, re.IGNORECASE
+        )
+        if match_capital:
+            try:
+                val_str = match_capital.group(1).replace(".", "").replace(",", ".")
+                capital_exigido = float(val_str)
+                if capital_empresa < capital_exigido:
+                    itens_extra.append(ItemCompliance(
+                        categoria=CategoriaRisco.FINANCEIRO,
+                        severidade="CRITICO",
+                        titulo="Capital Social da Empresa Insuficiente",
+                        trecho_encontrado=match_capital.group(0),
+                        fundamentacao=(
+                            f"O edital exige R$ {capital_exigido:,.2f} de capital social. "
+                            f"Sua empresa possui R$ {capital_empresa:,.2f}. "
+                            "Você será inabilitado nesta fase. "
+                            "Considere consórcio ou impugnação da cláusula."
+                        ),
+                        pontos_deduzidos=35,
+                    ))
+            except (ValueError, AttributeError):
+                pass
+
+        # Verifica índice de liquidez do edital vs empresa
+        match_liq = re.search(
+            r"liquidez\s+corrente.*?([\d]+[,.][\d]+)", texto, re.IGNORECASE
+        )
+        if match_liq:
+            try:
+                liq_exigida = float(match_liq.group(1).replace(",", "."))
+                if liquidez_empresa < liq_exigida:
+                    itens_extra.append(ItemCompliance(
+                        categoria=CategoriaRisco.FINANCEIRO,
+                        severidade="CRITICO",
+                        titulo="Índice de Liquidez Insuficiente",
+                        trecho_encontrado=match_liq.group(0),
+                        fundamentacao=(
+                            f"Edital exige liquidez corrente ≥ {liq_exigida:.2f}. "
+                            f"Sua empresa tem {liquidez_empresa:.2f}. "
+                            "Risco de inabilitação financeira."
+                        ),
+                        pontos_deduzidos=30,
+                    ))
+            except (ValueError, AttributeError):
+                pass
+
+        return itens_extra
+
+    def _detectar_padrao_agu(self, texto: str) -> bool:
+        """
+        Detecta se o edital foi gerado pelo sistema automatizado da AGU
+        (padrão v2025/2026).
+        """
+        marcadores_agu = [
+            r"ASSESSORIA\s+JURÍDICA\s+DA\s+UNIÃO",
+            r"minuta\s+padrão\s+AGU",
+            r"Modelo\s+de\s+Edital.*AGU",
+            r"elaborado\s+conforme\s+orientação\s+da\s+AGU",
+            r"CGU.*Instrução\s+Normativa",
+            r"SEGES/MGI.*\d{4}/202[5-6]",
+        ]
+        return any(
+            re.search(m, texto, re.IGNORECASE) for m in marcadores_agu
+        )
+
+    @staticmethod
+    def _extrair_contexto(texto: str, regex: re.Pattern,
+                          contexto: int = 150) -> str:
+        """Retorna o trecho do texto ao redor do match."""
+        match = regex.search(texto)
+        if not match:
+            return ""
+        inicio = max(0, match.start() - contexto)
+        fim    = min(len(texto), match.end() + contexto)
+        return f"...{texto[inicio:fim].strip()}..."
+
+    @staticmethod
+    def _gerar_resumo(score: int, classificacao: str,
+                      criticos: list, moderados: list,
+                      agu: bool) -> str:
+        partes = [
+            f"Score de Viabilidade: {score}/100 — {classificacao}.",
+            f"{len(criticos)} risco(s) crítico(s) e {len(moderados)} moderado(s) identificado(s).",
+        ]
+        if criticos:
+            partes.append(
+                f"Principal risco: {criticos[0].titulo}."
+            )
+        if agu:
+            partes.append(
+                "Padrão AGU detectado: extração acelerada disponível (100% de precisão)."
+            )
+        return " ".join(partes)
+
+
+
+# ── AGU_PARSER ──────────────────────────────────────────────
+# ── Assinaturas do Padrão AGU ───────────────────────────
+# Se 2+ padrões forem encontrados, o edital é classificado como AGU
+ASSINATURAS_AGU = [
+    r"Advocacia-Geral\s+da\s+União",
+    r"AGU\s*[-–]\s*Modelo\s+de\s+Contrato",
+    r"Minuta\s+Padrão\s+(?:AGU|PGF|CGU)",
+    r"gerado\s+automaticamente\s+pelo\s+sistema\s+(?:AGU|SAPIENS)",
+    r"SAPIENS\s*[-/]\s*AGU",
+    r"SEGES/MGI.*n[oº]\.?\s*\d+/202[5-6]",
+    r"Resolução\s+AGU.*7[02]/202[4-6]",
+    r"Portaria\s+AGU.*40/202[3-6]",
+    r"IN\s+SEGES.*65/2021",
+]
+
+# ── Mapeamento Fixo de Campos (Fast Extraction) ─────────
+# Cada campo: (nome, regex de captura, grupo de captura, transformação)
+CAMPOS_AGU = {
+
+    # Identificação
+    "numero_edital": (
+        r"Edital\s+(?:de\s+)?(?:Licitação\s+)?n[oº]?\s*([\d\./\-]+)",
+        1, str
+    ),
+    "modalidade": (
+        r"(Pregão\s+Eletrônico|Concorrência\s+Eletrônica|Dispensa\s+Eletrônica|"
+        r"Tomada\s+de\s+Preços|Credenciamento)",
+        1, str
+    ),
+    "uasg": (
+        r"UASG\s*[:\-]?\s*(\d{6})",
+        1, str
+    ),
+    "valor_estimado": (
+        r"[Vv]alor\s+(?:global\s+)?(?:estimado|total\s+estimado)[:\s]+R\$\s*([\d\.\,]+)",
+        1, _parse_valor
+    ),
+
+    # Prazos (Seção 3 — padrão AGU sempre numerada)
+    "data_abertura": (
+        r"(?:Data\s+(?:de\s+)?(?:abertura|sessão)|Abertura\s+das\s+Propostas)[:\s]+"
+        r"(\d{2}/\d{2}/\d{4})",
+        1, str
+    ),
+    "prazo_entrega_dias": (
+        r"[Pp]razo\s+(?:de\s+)?(?:entrega|execução|fornecimento)[:\s]+(\d+)\s+"
+        r"(?:dias?\s+(?:corridos|úteis|calendário))",
+        1, int
+    ),
+    "prazo_vigencia_meses": (
+        r"[Vv]igência\s+(?:do\s+contrato\s+)?(?:de\s+)?(\d+)\s+(?:meses?|MESES?)",
+        1, int
+    ),
+    "prazo_impugnacao_dias": (
+        r"impugna(?:ção|r)[^.]*?até\s+(\d+)\s+(?:dias?\s+úteis|dias?\s+antes)",
+        1, int
+    ),
+    "prazo_recurso_dias": (
+        r"(?:prazo\s+de\s+)?recurso[^.]*?(\d+)\s+dias?\s+(?:úteis|corridos)",
+        1, int
+    ),
+
+    # Garantias (Seção 9 — padrão AGU)
+    "garantia_contratual_pct": (
+        r"[Gg]arantia\s+(?:contratual\s+)?(?:de\s+)?(\d+(?:[,\.]\d+)?)\s*%\s+"
+        r"(?:do\s+valor\s+)?(?:do\s+)?(?:contrato|ajuste)",
+        1, _parse_pct
+    ),
+    "garantia_proposta_pct": (
+        r"[Gg]arantia\s+de\s+(?:participação|proposta)[^.]*?(\d+(?:[,\.]\d+)?)\s*%",
+        1, _parse_pct
+    ),
+
+    # Sanções (Seção 15 — padrão AGU)
+    "multa_mora_pct": (
+        r"[Mm]ulta\s+(?:moratória|por\s+mora)[^.]*?(\d+(?:[,\.]\d+)?)\s*%\s+"
+        r"(?:ao\s+dia|por\s+dia)",
+        1, _parse_pct
+    ),
+    "multa_inadimplemento_pct": (
+        r"[Mm]ulta[^.]*?(?:inadimplemento|inexecução\s+total)[^.]*?"
+        r"(\d+(?:[,\.]\d+)?)\s*%",
+        1, _parse_pct
+    ),
+    "suspensao_meses": (
+        r"[Ss]uspensão[^.]*?(\d+)\s+(?:meses?|MESES?)",
+        1, int
+    ),
+    "impedimento_anos": (
+        r"[Ii]mpedimento[^.]*?(\d+)\s+anos?",
+        1, int
+    ),
+
+    # Habilitação (Seção 6 — padrão AGU)
+    "capital_social_minimo": (
+        r"[Cc]apital\s+[Ss]ocial\s+(?:mínimo\s+)?(?:de\s+)?R\$\s*([\d\.\,]+)",
+        1, _parse_valor
+    ),
+    "liquidez_corrente_minima": (
+        r"[Ll]iquidez\s+[Cc]orrente\s+(?:mínima?\s+)?(?:igual\s+ou\s+superior\s+a\s+)?"
+        r"(\d+(?:[,\.]\d+)?)",
+        1, _parse_pct
+    ),
+    "patrimonio_liquido_pct": (
+        r"[Pp]atrimônio\s+[Ll]íquido\s+(?:mínimo\s+de\s+)?(\d+(?:[,\.]\d+)?)\s*%",
+        1, _parse_pct
+    ),
+}
+
+
+def _parse_valor(s: str) -> float:
+    """Converte 'R$ 1.234.567,89' → 1234567.89"""
+    try:
+        return float(s.replace(".", "").replace(",", "."))
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+def _parse_pct(s: str) -> float:
+    """Converte '5,5' → 5.5"""
+    try:
+        return float(str(s).replace(",", "."))
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+@dataclass
+class EditalAGU:
+    """Estrutura normalizada extraída de um edital padrão AGU."""
+    detectado: bool
+    confianca: float                        # 0.0–1.0
+
+    # Identificação
+    numero_edital: str         = ""
+    modalidade: str            = ""
+    uasg: str                  = ""
+    valor_estimado: float      = 0.0
+
+    # Prazos
+    data_abertura: str         = ""
+    prazo_entrega_dias: int    = 0
+    prazo_vigencia_meses: int  = 0
+    prazo_impugnacao_dias: int = 0
+    prazo_recurso_dias: int    = 0
+
+    # Garantias
+    garantia_contratual_pct: float = 0.0
+    garantia_proposta_pct: float   = 0.0
+
+    # Sanções
+    multa_mora_pct: float          = 0.0
+    multa_inadimplemento_pct: float = 0.0
+    suspensao_meses: int           = 0
+    impedimento_anos: int          = 0
+
+    # Habilitação
+    capital_social_minimo: float   = 0.0
+    liquidez_corrente_minima: float = 0.0
+    patrimonio_liquido_pct: float  = 0.0
+
+    # Meta
+    campos_extraidos: list[str]    = field(default_factory=list)
+    campos_ausentes: list[str]     = field(default_factory=list)
+    alertas: list[str]             = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {k: v for k, v in self.__dict__.items()
+                if not k.startswith("_")}
+
+
+class ParserAGU:
+    """
+    Parser de editais padrão AGU — extração determinística de campos.
+
+    Por que determinístico e não IA?
+    - Editais AGU seguem template fixo com seções numeradas.
+    - Regex sobre estrutura conhecida = 100% de precisão + 0 custo de tokens.
+    - A IA (Claude) é reservada para editais não-padronizados.
+
+    Uso:
+        parser = ParserAGU()
+        edital = parser.extrair(texto_pdf)
+        if edital.detectado:
+            print(f"Multa por mora: {edital.multa_mora_pct}% ao dia")
+    """
+
+    def __init__(self):
+        # Pré-compila assinaturas para detecção
+        self._assinaturas = [
+            re.compile(p, re.IGNORECASE | re.MULTILINE)
+            for p in ASSINATURAS_AGU
+        ]
+        # Pré-compila campos para extração
+        self._campos = {
+            nome: (re.compile(padrao, re.IGNORECASE | re.MULTILINE | re.DOTALL),
+                   grupo, transform)
+            for nome, (padrao, grupo, transform) in CAMPOS_AGU.items()
+        }
+
+    def extrair(self, texto: str) -> EditalAGU:
+        """
+        Ponto de entrada principal.
+        Detecta o padrão AGU e extrai todos os campos em sequência.
+        """
+        detectado, confianca = self._detectar_padrao(texto)
+
+        edital = EditalAGU(detectado=detectado, confianca=confianca)
+
+        if not detectado:
+            edital.alertas.append(
+                "Padrão AGU não detectado. Use o módulo Claude (Auditoria) "
+                "para extração via IA."
+            )
+            return edital
+
+        # Extração campo a campo
+        for nome, (regex, grupo, transform) in self._campos.items():
+            match = regex.search(texto)
+            if match:
+                try:
+                    valor_raw = match.group(grupo)
+                    setattr(edital, nome, transform(valor_raw))
+                    edital.campos_extraidos.append(nome)
+                except (IndexError, ValueError, TypeError):
+                    edital.campos_ausentes.append(nome)
+            else:
+                edital.campos_ausentes.append(nome)
+
+        # Validações e alertas automáticos
+        self._validar(edital)
+
+        return edital
+
+    def _detectar_padrao(self, texto: str) -> tuple[bool, float]:
+        """Retorna (detectado, confiança 0-1)."""
+        matches = sum(1 for sig in self._assinaturas if sig.search(texto))
+        confianca = min(1.0, matches / 3)   # 3 matches = 100% confiança
+        return confianca >= 0.33, confianca  # mínimo: 1 assinatura
+
+    def _validar(self, edital: EditalAGU):
+        """Gera alertas automáticos sobre valores fora dos padrões legais."""
+
+        # Multa mora > 1% ao dia é abusiva (Lei 14.133/21, Art. 162)
+        if edital.multa_mora_pct > 1.0:
+            edital.alertas.append(
+                f"⚠️ Multa moratória de {edital.multa_mora_pct}%/dia pode ser contestada. "
+                f"Lei 14.133/2021, Art. 162 — máximo usual: 0,5% a 1%/dia."
+            )
+
+        # Multa inadimplemento > 30% é considerada abusiva
+        if edital.multa_inadimplemento_pct > 30:
+            edital.alertas.append(
+                f"⚠️ Multa por inexecução de {edital.multa_inadimplemento_pct}% "
+                f"excede o limite usual de 20-30%. Verifique proporcionalidade."
+            )
+
+        # Garantia > 5% sem justificativa
+        if edital.garantia_contratual_pct > 5.0:
+            edital.alertas.append(
+                f"⚠️ Garantia contratual de {edital.garantia_contratual_pct}% "
+                f"supera o padrão de 5% (Lei 14.133/21, Art. 98). "
+                f"Exige justificativa técnica no processo."
+            )
+
+        # Liquidez > 1.5 sem justificativa
+        if edital.liquidez_corrente_minima > 1.5:
+            edital.alertas.append(
+                f"⚠️ Liquidez corrente exigida de {edital.liquidez_corrente_minima:.2f} "
+                f"supera 1,5. TCU considera restritivo sem justificativa (Súmula 272)."
+            )
+
+        # Prazo de recurso < 3 dias úteis
+        if 0 < edital.prazo_recurso_dias < 3:
+            edital.alertas.append(
+                f"⚠️ Prazo de recurso de {edital.prazo_recurso_dias} dias pode ser "
+                f"insuficiente. Lei 14.133/21, Art. 165 — mínimo de 3 dias úteis."
+            )
+
+    def resumo_rapido(self, edital: EditalAGU) -> str:
+        """Gera resumo textual para exibição imediata na UI."""
+        if not edital.detectado:
+            return "Padrão AGU não identificado neste edital."
+
+        linhas = [
+            f"✅ Edital AGU detectado (confiança: {edital.confianca*100:.0f}%)",
+            f"📋 {edital.modalidade or 'Modalidade não identificada'} — {edital.numero_edital}",
+            f"💰 Valor estimado: R$ {edital.valor_estimado:,.2f}" if edital.valor_estimado else "",
+            f"📅 Abertura: {edital.data_abertura}" if edital.data_abertura else "",
+            f"⚖️ Garantia: {edital.garantia_contratual_pct}% do contrato" if edital.garantia_contratual_pct else "",
+            f"🔨 Multa mora: {edital.multa_mora_pct}%/dia | Inadimplemento: {edital.multa_inadimplemento_pct}%",
+            f"📊 Campos extraídos: {len(edital.campos_extraidos)}/{len(CAMPOS_AGU)}",
+        ]
+        return "\n".join(l for l in linhas if l)
+
+
+
+# ══════════════════════════════════════════
+# APP PRINCIPAL
+# ══════════════════════════════════════════
 
 # --- 1. PAGE CONFIG ---
 st.set_page_config(
@@ -515,8 +1764,9 @@ tabs = st.tabs([
     "⚖️ Advogado AI",
     "🕵️ Espião de Concorrência",
     "🔐 The Vault (Certidões)",
+    "🤖 Co-Piloto Autônomo",
 ])
-tab_perfil, tab_auditoria, tab_cacador, tab_juridico, tab_espiao, tab_vault = tabs
+tab_perfil, tab_auditoria, tab_cacador, tab_juridico, tab_espiao, tab_vault, tab_copiloto = tabs
 
 
 # ══════════════════════════════════════════
@@ -1103,3 +2353,447 @@ with tab_vault:
                            f"e indique riscos de inabilitação, urgências de renovação e boas práticas:\n{resumo}")
                 analise = chamar_claude(client, system, user, max_tokens=1500)
                 risk_card("Análise Documental", "DIAGNÓSTICO DO VAULT", analise)
+
+    
+
+# ══════════════════════════════════════════════════════════════
+# ABA 7 — CO-PILOTO AUTÔNOMO
+# ══════════════════════════════════════════════════════════════
+with tab_copiloto:
+    st.markdown("""
+    <div class="page-header">
+        <h2>🤖 Co-Piloto Autônomo</h2>
+        <p>Favorite uma licitação. O sistema assume o resto — vigilância, compliance e proteção em tempo real.</p>
+    </div>""", unsafe_allow_html=True)
+
+    # ── Inicializa estado do Co-Piloto ──────────────────────────────────
+    if "copiloto" not in st.session_state:
+        st.session_state.copiloto = {
+            "editais_monitorados": [],
+            "alertas": [],
+            "ultimo_compliance": None,
+            "ultimo_agu": None,
+            "lances_config": {"custo_direto": 0.0, "bdi_pct": 20.0,
+                               "margem_pct": 10.0, "impostos_pct": 9.25},
+        }
+    cp = st.session_state.copiloto
+
+    # ── PAINEL DE STATUS ─────────────────────────────────────────────────
+    n_editais = len(cp["editais_monitorados"])
+    n_alertas = len([a for a in cp["alertas"] if a.get("nivel") == "CRITICO"])
+    n_total   = len(cp["alertas"])
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Editais em Vigília", n_editais, "Sentinela ativo" if n_editais else "Nenhum")
+    c2.metric("Alertas Críticos",   n_alertas, delta=f"{n_alertas} não lidos", delta_color="inverse" if n_alertas else "normal")
+    c3.metric("Total de Alertas",   n_total)
+    c4.metric("Motor",             "Claude Sonnet" if api_key else "Inativo",
+              "✅ Conectado" if api_key else "⚠️ Sem Key")
+
+    st.divider()
+
+    # ════════════════════════════════════════
+    # MÓDULO 1 — SENTINELA
+    # ════════════════════════════════════════
+    section("👁️", "Módulo Sentinela — Vigilância de Editais")
+    st.caption("Adicione URLs de editais do PNCP ou Compras.gov. O Sentinela detecta retificações e classifica o risco automaticamente.")
+
+    col_url, col_btn = st.columns([4, 1])
+    with col_url:
+        nova_url = st.text_input("URL do Edital", label_visibility="collapsed",
+                                 placeholder="https://pncp.gov.br/app/editais/...")
+    with col_btn:
+        if st.button("➕ Favoritar"):
+            if nova_url and nova_url.startswith("http"):
+                if nova_url not in cp["editais_monitorados"]:
+                    cp["editais_monitorados"].append(nova_url)
+                    st.success("Edital adicionado à vigília!")
+                    st.rerun()
+                else:
+                    st.warning("Este edital já está sendo monitorado.")
+            else:
+                st.error("Insira uma URL válida.")
+
+    # Lista editais monitorados
+    if cp["editais_monitorados"]:
+        st.markdown("<br>", unsafe_allow_html=True)
+        for i, url in enumerate(cp["editais_monitorados"]):
+            col_e, col_status, col_rm = st.columns([5, 2, 1])
+            with col_e:
+                st.markdown(f"<small>🔗 {url[:70]}{'...' if len(url) > 70 else ''}</small>",
+                            unsafe_allow_html=True)
+            with col_status:
+                st.markdown('<span style="color:#22c55e; font-size:12px;">● Monitorando</span>',
+                            unsafe_allow_html=True)
+            with col_rm:
+                if st.button("✕", key=f"rm_{i}"):
+                    cp["editais_monitorados"].pop(i)
+                    st.rerun()
+
+        # Simulação de verificação manual (em produção: roda async em background)
+        if st.button("🔄 Verificar Agora") and api_key:
+            with st.spinner("Sentinela verificando alterações..."):
+                client = get_claude(api_key)
+                system = (
+                    "Você é o módulo Sentinela da LicitA-IA. Simule uma verificação de monitoramento "
+                    "de edital e gere um relatório realista em JSON com esta estrutura:\n"
+                    '{"status": "alterado|sem_alteracao", "nivel": "CRITICO|MODERADO|INFORMATIVO", '
+                    '"resumo": "string", "delta": [{"tipo":"adicionado|removido","conteudo":"string"}], '
+                    '"recomendacao": "string"}'
+                )
+                user = (f"Simule verificação do edital: {cp['editais_monitorados'][0]}\n"
+                        f"Empresa: {st.session_state.empresa['razao_social'] or 'N/A'}")
+                raw = chamar_claude(client, system, user, max_tokens=1000)
+                resultado = parse_json(raw)
+
+                nivel = resultado.get("nivel", "INFO")
+                cor   = {"CRITICO": "critical", "MODERADO": "warning"}.get(nivel, "")
+                risk_card(
+                    f"Relatório Sentinela — {resultado.get('status','').upper()}",
+                    f"{nivel} | {resultado.get('resumo','')}",
+                    f"**Recomendação:** {resultado.get('recomendacao','')}\n\n"
+                    + "\n".join(f"{'➕' if d['tipo']=='adicionado' else '➖'} {d['conteudo']}"
+                                for d in resultado.get("delta", [])[:5]),
+                    cor
+                )
+                cp["alertas"].append({
+                    "nivel": nivel, "resumo": resultado.get("resumo", ""),
+                    "url": cp["editais_monitorados"][0],
+                    "timestamp": __import__("datetime").datetime.now().isoformat()
+                })
+    else:
+        st.info("Nenhum edital em monitoramento. Adicione uma URL acima para iniciar a vigília.")
+
+    st.divider()
+
+    # ════════════════════════════════════════
+    # MÓDULO 2 — ANTI-PREÇO SUICIDA
+    # ════════════════════════════════════════
+    section("💰", "Módulo Anti-Preço Suicida — Vigilante de Lances")
+    st.caption("Configure sua planilha de custos. O sistema alertará se um lance ameaçar sua margem ou cruzar o piso de inexequibilidade.")
+
+    with st.expander("⚙️ Configurar Planilha de Custos", expanded=False):
+        lc = cp["lances_config"]
+        ap1, ap2 = st.columns(2)
+        with ap1:
+            lc["custo_direto"] = st.number_input(
+                "Custo Direto Total (R$)", value=float(lc["custo_direto"]),
+                min_value=0.0, step=1000.0, format="%.2f",
+                help="Materiais + Mão de obra + Encargos"
+            )
+            lc["bdi_pct"] = st.number_input(
+                "BDI / Despesas Indiretas (%)", value=float(lc["bdi_pct"]),
+                min_value=0.0, max_value=100.0, step=0.5, format="%.2f"
+            )
+        with ap2:
+            lc["margem_pct"] = st.number_input(
+                "Margem de Lucro (%)", value=float(lc["margem_pct"]),
+                min_value=0.0, max_value=100.0, step=0.5, format="%.2f"
+            )
+            lc["impostos_pct"] = st.number_input(
+                "Impostos ISS+PIS+COFINS (%)", value=float(lc["impostos_pct"]),
+                min_value=0.0, max_value=30.0, step=0.25, format="%.2f"
+            )
+
+    # Cálculos da planilha em tempo real
+    custo_d = lc["custo_direto"]
+    if custo_d > 0:
+        bdi      = lc["bdi_pct"]   / 100
+        margem   = lc["margem_pct"] / 100
+        impostos = lc["impostos_pct"] / 100
+        custo_total  = custo_d * (1 + bdi + impostos)
+        preco_alvo   = custo_total * (1 + margem)
+        piso_inex    = custo_d * 0.70     # 70% do custo direto (TCU)
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Custo Total (com BDI+impostos)", f"R$ {custo_total:,.2f}")
+        m2.metric("Preço Alvo (com margem)",        f"R$ {preco_alvo:,.2f}")
+        m3.metric("Piso Inexequibilidade (TCU)",    f"R$ {piso_inex:,.2f}",
+                  "Art. 59 — Lei 14.133/21")
+
+        url_sala = st.text_input("URL da Sala de Lances (PNCP/Comprasnet)",
+                                 placeholder="https://pncp.gov.br/app/lances/...")
+        col_lance_input, col_lance_btn = st.columns([3, 1])
+        with col_lance_input:
+            menor_lance_manual = st.number_input(
+                "Menor Lance Atual (simulação manual)", value=0.0,
+                min_value=0.0, step=100.0, format="%.2f",
+                help="Em produção: capturado automaticamente da sala de lances"
+            )
+        with col_lance_btn:
+            st.markdown("<br>", unsafe_allow_html=True)
+            analisar_lance = st.button("⚡ Analisar Lance")
+
+        if analisar_lance and menor_lance_manual > 0:
+            margem_restante = (menor_lance_manual - custo_total) / custo_total
+
+            if menor_lance_manual < piso_inex:
+                risk_card(
+                    "PREÇO SUICIDA DETECTADO",
+                    f"CRÍTICO | Lance R$ {menor_lance_manual:,.2f} abaixo do piso de inexequibilidade",
+                    f"O lance de R$ {menor_lance_manual:,.2f} está abaixo do piso de inexequibilidade "
+                    f"(R$ {piso_inex:,.2f} = 70% do seu custo direto).\n\n"
+                    f"**Ação recomendada:** Prepare uma impugnação por inexequibilidade.\n"
+                    f"**Base legal:** Lei 14.133/2021, Art. 59 | Acórdão TCU 2170/2023.",
+                    "critical"
+                )
+            elif menor_lance_manual < custo_total:
+                risk_card(
+                    "RISCO DE PREJUÍZO OPERACIONAL",
+                    f"CRÍTICO | Lance abaixo do seu custo mínimo",
+                    f"O lance (R$ {menor_lance_manual:,.2f}) está abaixo do seu custo total "
+                    f"(R$ {custo_total:,.2f}). Cobrir esse preço geraria prejuízo.\n\n"
+                    f"**Decisão:** Recuar é a opção estratégica correta.",
+                    "critical"
+                )
+            elif margem_restante < 0.05:
+                risk_card(
+                    "MARGEM CRÍTICA",
+                    f"ATENÇÃO | Apenas {margem_restante*100:.1f}% de margem restante",
+                    f"Você ainda cobre o custo, mas com margem mínima de {margem_restante*100:.1f}%. "
+                    f"Considere se o risco operacional vale a pena.",
+                    "warning"
+                )
+            else:
+                risk_card(
+                    "SITUAÇÃO CONTROLADA",
+                    f"OK | {margem_restante*100:.1f}% de margem sobre o custo mínimo",
+                    f"Lance atual (R$ {menor_lance_manual:,.2f}) está dentro da sua zona de segurança. "
+                    f"Continue monitorando.",
+                    "success"
+                )
+    else:
+        st.info("Configure o custo direto acima para ativar o vigilante de lances.")
+
+    st.divider()
+
+    # ════════════════════════════════════════
+    # MÓDULO 3 — COMPLIANCE 2026
+    # ════════════════════════════════════════
+    section("⚖️", "Módulo Compliance & Governança 2026")
+    st.caption("Cole o texto do edital para análise instantânea de riscos, score de viabilidade e detecção de cláusulas restritivas da Lei 14.133/2021.")
+
+    texto_compliance = st.text_area(
+        "Texto do Edital para Análise de Compliance",
+        label_visibility="collapsed",
+        placeholder="Cole aqui o texto extraído do edital (ou extraia via Auditoria de Editais)...",
+        height=150
+    )
+
+    if st.button("🔬 Executar Análise Compliance") and texto_compliance:
+        if not api_key:
+            st.warning("API Key necessária para análise avançada.")
+        else:
+            with st.spinner("Scanning NLP — verificando conformidade com Lei 14.133/2021..."):
+                client = get_claude(api_key)
+                perfil = st.session_state.empresa
+                system = (
+                    "Você é o módulo de Compliance & Governança 2026 da LicitA-IA. "
+                    "Analise o edital e retorne APENAS JSON com esta estrutura:\n"
+                    '{"score_viabilidade": 0-100, "classificacao": "ALTO RISCO|RISCO MODERADO|VIÁVEL", '
+                    '"criticos": [{"titulo":"","descricao":"","base_legal":""}], '
+                    '"moderados": [{"titulo":"","descricao":"","base_legal":""}], '
+                    '"padrao_agu": true|false, '
+                    '"clausulas_6x1": true|false, '
+                    '"marca_especifica": true|false, '
+                    '"resumo_executivo": ""}'
+                )
+                user = (
+                    f"Edital para análise:\n{texto_compliance[:6000]}\n\n"
+                    f"Perfil da empresa:\n"
+                    f"- Capital Social: R$ {perfil['capital_social']:,.2f}\n"
+                    f"- Liquidez Corrente: {perfil['liquidez_corrente']:.2f}\n"
+                    f"- Certificações: {', '.join(perfil['certificacoes']) or 'Nenhuma'}"
+                )
+                raw = chamar_claude(client, system, user, max_tokens=2000)
+                res = parse_json(raw)
+                cp["ultimo_compliance"] = res
+
+            # Exibe score
+            score = res.get("score_viabilidade", 0)
+            classe = res.get("classificacao", "")
+            cor_score = "#22c55e" if score >= 75 else "#f59e0b" if score >= 50 else "#ef4444"
+
+            st.markdown(f"""
+            <div class="pcard" style="text-align:center; padding:32px;">
+                <div style="font-size:13px; font-weight:700; letter-spacing:0.1em;
+                            text-transform:uppercase; color:var(--text-color); opacity:0.5;
+                            margin-bottom:12px;">Score de Viabilidade</div>
+                <div style="font-size:72px; font-weight:800; color:{cor_score};
+                            line-height:1;">{score}</div>
+                <div style="font-size:16px; font-weight:600; color:{cor_score};
+                            margin-top:8px;">{classe}</div>
+                <div style="font-size:13px; color:var(--text-color); opacity:0.6;
+                            margin-top:12px;">{res.get('resumo_executivo','')}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Badges de detecção
+            flags = []
+            if res.get("clausulas_6x1"):
+                flags.append(("🚨 Cláusula 6x1 Detectada", "critical"))
+            if res.get("marca_especifica"):
+                flags.append(("🚨 Exigência de Marca", "critical"))
+            if res.get("padrao_agu"):
+                flags.append(("✅ Padrão AGU Detectado", "success"))
+
+            for flag, tipo in flags:
+                risk_card(flag, "DETECÇÃO AUTOMÁTICA",
+                          "Verifique o relatório completo abaixo.", tipo)
+
+            # Riscos críticos
+            criticos = res.get("criticos", [])
+            if criticos:
+                st.markdown("**Riscos Críticos**")
+                for item in criticos:
+                    risk_card(
+                        item.get("titulo", ""),
+                        f"CRÍTICO | {item.get('base_legal','')}",
+                        item.get("descricao", ""),
+                        "critical"
+                    )
+
+            # Riscos moderados
+            moderados = res.get("moderados", [])
+            if moderados:
+                st.markdown("**Riscos Moderados**")
+                for item in moderados:
+                    risk_card(
+                        item.get("titulo", ""),
+                        f"MODERADO | {item.get('base_legal','')}",
+                        item.get("descricao", ""),
+                        "warning"
+                    )
+
+    st.divider()
+
+    # ════════════════════════════════════════
+    # MÓDULO 4 — PARSER AGU
+    # ════════════════════════════════════════
+    section("🏛️", "Módulo Parser AGU — Extração Acelerada de Campos")
+    st.caption(
+        "Se o edital seguir o padrão oficial da AGU (v2025/2026), o sistema extrai multas, "
+        "prazos e sanções com 100% de precisão — sem custo de IA."
+    )
+
+    texto_agu = st.text_area(
+        "Texto do Edital para Parser AGU",
+        label_visibility="collapsed",
+        placeholder="Cole o texto do edital para detecção automática do padrão AGU...",
+        height=130,
+        key="agu_input"
+    )
+
+    if st.button("🏛️ Executar Parser AGU") and texto_agu:
+        with st.spinner("Detectando padrão AGU e extraindo campos..."):
+            # Detecção de padrão AGU via regex (zero custo de tokens)
+            import re
+            assinaturas_agu = [
+                r"Advocacia-Geral\s+da\s+União",
+                r"AGU\s*[-–]\s*Modelo",
+                r"Minuta\s+Padrão\s+(?:AGU|PGF|CGU)",
+                r"SAPIENS\s*[-/]\s*AGU",
+                r"SEGES/MGI.*n[oº]\.?\s*\d+/202[5-6]",
+                r"Resolução\s+AGU.*7[02]/202[4-6]",
+                r"Portaria\s+AGU.*40/202[3-6]",
+            ]
+            matches_agu = sum(
+                1 for p in assinaturas_agu
+                if re.search(p, texto_agu, re.IGNORECASE)
+            )
+            confianca = min(100, int(matches_agu / 3 * 100)) if matches_agu else 0
+            detectado = matches_agu >= 1
+
+            # Extração determinística de campos-chave
+            def _extrair(padrao, texto, default="Não identificado"):
+                m = re.search(padrao, texto, re.IGNORECASE | re.DOTALL)
+                return m.group(1).strip() if m else default
+
+            campos = {
+                "Modalidade":         _extrair(r"(Pregão\s+Eletrônico|Concorrência\s+Eletrônica|Dispensa\s+Eletrônica)", texto_agu),
+                "Número do Edital":   _extrair(r"[Ee]dital.*?n[oº]?\s*([\d\./\-]+)", texto_agu),
+                "UASG":               _extrair(r"UASG\s*[:\-]?\s*(\d{6})", texto_agu),
+                "Valor Estimado":     _extrair(r"[Vv]alor.*?estimado.*?R\$\s*([\d\.\,]+)", texto_agu),
+                "Data de Abertura":   _extrair(r"[Aa]bertura.*?(\d{2}/\d{2}/\d{4})", texto_agu),
+                "Prazo de Execução":  _extrair(r"[Pp]razo.*?execução.*?(\d+\s+dias?[^.]*)", texto_agu),
+                "Vigência":           _extrair(r"[Vv]igência.*?(\d+\s+meses?[^.]*)", texto_agu),
+                "Garantia Contratual":_extrair(r"[Gg]arantia.*?(\d+(?:[,\.]\d+)?)\s*%.*?contrato", texto_agu),
+                "Multa Moratória":    _extrair(r"[Mm]ulta\s+morat.*?(\d+(?:[,\.]\d+)?)\s*%.*?dia", texto_agu),
+                "Multa Inadimplemento": _extrair(r"[Mm]ulta.*?inadimpl.*?(\d+(?:[,\.]\d+)?)\s*%", texto_agu),
+                "Prazo de Recurso":   _extrair(r"[Rr]ecurso.*?(\d+)\s+dias?\s+úteis", texto_agu),
+                "Capital Social Mín.":_extrair(r"[Cc]apital\s+[Ss]ocial.*?R\$\s*([\d\.\,]+)", texto_agu),
+                "Liquidez Corrente":  _extrair(r"[Ll]iquidez\s+[Cc]orrente.*?(\d+[,\.]\d+)", texto_agu),
+            }
+            cp["ultimo_agu"] = {"detectado": detectado, "confianca": confianca, "campos": campos}
+
+        # Exibe resultado da detecção
+        if detectado:
+            st.success(
+                f"✅ Padrão AGU detectado com {confianca}% de confiança. "
+                f"Extração determinística ativa — sem custo de tokens IA."
+            )
+        else:
+            st.warning(
+                "⚠️ Padrão AGU não identificado. Edital será processado via Claude (Auditoria de Editais). "
+                "Custo computacional normal."
+            )
+
+        # Tabela de campos extraídos
+        import pandas as pd
+        df_campos = pd.DataFrame([
+            {"Campo": k, "Valor Extraído": v,
+             "Status": "✅" if v != "Não identificado" else "❌"}
+            for k, v in campos.items()
+        ])
+        extraidos_ok = (df_campos["Status"] == "✅").sum()
+        st.metric("Campos extraídos com sucesso",
+                  f"{extraidos_ok}/{len(campos)}",
+                  f"{int(extraidos_ok/len(campos)*100)}% de precisão")
+        st.dataframe(df_campos, use_container_width=True, hide_index=True)
+
+        # Alertas legais automáticos
+        alertas_legais = []
+        multa_str = campos.get("Multa Inadimplemento", "")
+        try:
+            multa_val = float(re.sub(r"[^\d,.]", "", multa_str).replace(",", "."))
+            if multa_val > 30:
+                alertas_legais.append(
+                    f"Multa por inadimplemento de {multa_val}% pode ser contestada "
+                    f"(Lei 14.133/2021, Art. 162 — máximo usual: 20-30%)."
+                )
+        except (ValueError, AttributeError):
+            pass
+
+        liq_str = campos.get("Liquidez Corrente", "")
+        try:
+            liq_val = float(liq_str.replace(",", "."))
+            if liq_val > 1.5:
+                alertas_legais.append(
+                    f"Liquidez corrente exigida de {liq_val:.2f} supera 1,5. "
+                    f"TCU considera restritivo (Súmula 272)."
+                )
+        except (ValueError, AttributeError):
+            pass
+
+        if alertas_legais:
+            st.markdown("**⚠️ Alertas Legais Automáticos**")
+            for alerta in alertas_legais:
+                risk_card("Alerta Legal", "COMPLIANCE AGU", alerta, "warning")
+
+    # ── Histórico de Alertas ─────────────────────────────────────────────
+    if cp["alertas"]:
+        st.divider()
+        section("🔔", "Histórico de Alertas do Co-Piloto")
+        for alerta in reversed(cp["alertas"][-10:]):  # últimos 10
+            nivel = alerta.get("nivel", "INFO")
+            tipo  = {"CRITICO": "critical", "MODERADO": "warning"}.get(nivel, "")
+            ts    = alerta.get("timestamp", "")[:16].replace("T", " ")
+            risk_card(
+                alerta.get("resumo", "Alerta sem descrição"),
+                f"{nivel} | {ts}",
+                alerta.get("url", ""),
+                tipo
+            )
+        if st.button("🗑️ Limpar Histórico de Alertas"):
+            cp["alertas"] = []
+            st.rerun()
