@@ -477,20 +477,26 @@ with st.sidebar:
 
     if st.button("🗑️ Limpar Resultados"):
         for k in ["resultado_auditoria", "resultado_cacador",
-                  "resultado_juridico", "resultado_espiao"]:
+                  "resultado_juridico", "resultado_espiao",
+                  "dados_concorrente"]:
             st.session_state[k] = None
+        if "vault" in st.session_state:
+            del st.session_state["vault"]
         st.rerun()
 
     # ── Rodapé ────────────────────────────────────────────
+    # Espaço para o rodapé não sobrepor o botão
+    st.markdown("<div style='height:110px'></div>", unsafe_allow_html=True)
     st.markdown("""
     <div style="position:fixed; bottom:0; left:0; width:245px;
-                padding:16px 20px; border-top:1px solid rgba(255,255,255,0.08);">
-        <div style="font-size:11.5px; color:rgba(255,255,255,0.55); line-height:1.6;
-                    margin-bottom:10px;">
-            Sistema especializado na <b style="color:#fff;">Nova Lei de Licitações (14.133)</b>.
+                padding:14px 20px; border-top:1px solid rgba(255,255,255,0.08);
+                background:#001529; z-index:0; pointer-events:none;">
+        <div style="font-size:11px; color:rgba(255,255,255,0.5); line-height:1.6;
+                    margin-bottom:6px;">
+            Sistema especializado na <b style="color:#cce0ff;">Nova Lei de Licitações (14.133)</b>.
             Identifica cláusulas restritivas e exigências de habilitação críticas.
         </div>
-        <div style="font-size:10px; color:rgba(255,255,255,0.3);">
+        <div style="font-size:10px; color:rgba(255,255,255,0.25);">
             Desenvolvido para: Unidade de Inteligência
         </div>
     </div>
