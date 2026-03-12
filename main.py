@@ -9,7 +9,7 @@ st.set_page_config(
     page_title="LicitA-IA | Intelligence Unit",
     layout="wide",
     page_icon="🛡️",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
 # --- 2. CSS GLOBAL ---
@@ -23,10 +23,19 @@ html, body, [class*="css"] {
 }
 /* Herda o background do tema Streamlit — sem sobrescrever */
 [data-testid="stHeader"] {
-    background: linear-gradient(90deg, #001529 0%, #003a8c 60%, #096dd9 100%);
-    height: 48px;
+    background: linear-gradient(90deg, #001529 0%, #003a8c 50%, #096dd9 100%);
+    height: 3rem;
 }
-[data-testid="stSidebar"] { display: none; }
+/* ── Sidebar ──────────────────────────────────────────── */
+[data-testid="stSidebar"] {
+    background: var(--secondary-background-color) !important;
+    border-right: 1px solid rgba(128,128,128,0.12) !important;
+}
+[data-testid="stSidebar"] h1 {
+    font-size: 18px !important;
+    font-weight: 700 !important;
+    color: var(--text-color) !important;
+}
 
 /* ── Tabs ─────────────────────────────────────────────── */
 .stTabs [data-baseweb="tab-list"] {
@@ -121,15 +130,14 @@ html, body, [class*="css"] {
 
 /* ── Buttons ──────────────────────────────────────────── */
 .stButton > button {
-    background: linear-gradient(135deg, #1d6ff2 0%, #003a8c 100%) !important;
+    background: linear-gradient(90deg, #096dd9 0%, #003a8c 100%) !important;
     color: #ffffff !important;
     border: none !important;
     border-radius: 8px !important;
     font-size: 13.5px !important;
     font-weight: 600 !important;
-    padding: 10px 22px !important;
-    letter-spacing: 0.02em !important;
-    transition: all 0.2s ease !important;
+    padding: 12px 30px !important;
+    transition: 0.3s !important;
     box-shadow: 0 2px 8px rgba(9,109,217,0.25) !important;
     width: 100% !important;
 }
@@ -351,36 +359,33 @@ def section(icon: str, title: str):
     """, unsafe_allow_html=True)
 
 
-# --- 5. HEADER ---
-st.markdown("""
-<div style="background:var(--secondary-background-color);
-            border-bottom:1px solid rgba(128,128,128,0.15);
-            padding:18px 32px; margin-bottom:8px;
-            box-shadow:0 1px 4px rgba(0,0,0,0.06);
-            display:flex; align-items:center; gap:16px;">
-    <img src="https://img.icons8.com/fluency/96/shield.png"
-         style="width:48px; height:48px; flex-shrink:0;" />
-    <div>
-        <div style="font-size:22px; font-weight:700; color:#096dd9; line-height:1.2;">
-            LicitA-IA: Intelligence Unit
-        </div>
-        <div style="font-size:13px; color:var(--text-color); opacity:0.5; font-weight:500; margin-top:2px;">
-            Auditoria, Matching e Espionagem Competitiva em Tempo Real.
-        </div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+# --- 5. SIDEBAR ---
+with st.sidebar:
+    st.image("https://img.icons8.com/fluency/96/shield.png", width=60)
+    st.title("LicitA-IA Control")
+    st.markdown("---")
 
-# --- API KEY (discreta, no topo direito) ---
-api_col1, api_col2 = st.columns([4, 1])
-with api_col2:
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else ""
     if not api_key:
-        api_key = st.text_input("API Key", type="password", placeholder="sk-ant-...")
-        if api_key:
-            st.success("Motor ativo")
+        api_key = st.text_input("Anthropic API Key (Claude)", type="password",
+                                placeholder="sk-ant-...")
+    if api_key:
+        st.success("✅ Motor: Claude Sonnet ativo")
     else:
-        st.success("Motor ativo")
+        st.warning("⚠️ Insira a API Key para ativar o motor")
+
+    st.markdown("---")
+    empresa_nome = st.session_state.empresa["razao_social"] or "Aguardando Setup"
+    st.info(f"🏢 **Empresa Ativa:**\n{empresa_nome}")
+
+    st.markdown("---")
+    st.caption("Sensibilidade configurada para a Lei 14.133/21.")
+
+    if st.button("🗑️ Limpar Todos os Resultados"):
+        for k in ["resultado_auditoria", "resultado_cacador",
+                  "resultado_juridico", "resultado_espiao"]:
+            st.session_state[k] = None
+        st.rerun()
 
 # --- 6. ABAS ---
 tabs = st.tabs([
