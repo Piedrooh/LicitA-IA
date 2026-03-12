@@ -1,291 +1,76 @@
 import streamlit as st
+import pandas as pd
 import anthropic
 import requests
 import fitz  # PyMuPDF
 import json
+import time
 
-# --- 1. PAGE CONFIG ---
+# --- 1. CONFIGURAÇÕES E TEMA ---
 st.set_page_config(
     page_title="LicitA-IA | Intelligence Unit",
     layout="wide",
-    page_icon="🛡️",
-    initial_sidebar_state="collapsed"
+    page_icon="🛡️"
 )
 
-# --- 2. CSS GLOBAL ---
 st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-
-/* ── Reset & Base ─────────────────────────────────────── */
-html, body, [class*="css"] {
-    font-family: 'Inter', sans-serif !important;
-}
-.stApp {
-    background-color: #f0f4f8;
-}
-[data-testid="stHeader"] {
-    background: linear-gradient(90deg, #001529 0%, #003a8c 60%, #096dd9 100%);
-    height: 48px;
-}
-[data-testid="stSidebar"] { display: none; }
-
-/* ── Top Nav ──────────────────────────────────────────── */
-.top-nav {
-    background: #ffffff;
-    border-bottom: 1px solid #e8edf2;
-    padding: 0 32px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 28px;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
-}
-.brand {
-    font-size: 18px;
-    font-weight: 700;
-    color: #003a8c;
-    margin-right: 32px;
-    white-space: nowrap;
-}
-
-/* ── Tabs ─────────────────────────────────────────────── */
-.stTabs [data-baseweb="tab-list"] {
-    gap: 0px;
-    background: transparent;
-    border-bottom: none;
-}
-.stTabs [data-baseweb="tab"] {
-    background: transparent;
-    border: none;
-    border-bottom: 3px solid transparent;
-    border-radius: 0;
-    padding: 14px 20px;
-    font-size: 13.5px;
-    font-weight: 600;
-    color: #64748b;
-    transition: all 0.2s;
-}
-.stTabs [data-baseweb="tab"]:hover {
-    color: #096dd9;
-    background: rgba(9,109,217,0.04);
-}
-.stTabs [aria-selected="true"] {
-    color: #096dd9 !important;
-    border-bottom: 3px solid #096dd9 !important;
-    background: transparent !important;
-}
-.stTabs [data-baseweb="tab-highlight"] { display: none; }
-.stTabs [data-baseweb="tab-border"]    { display: none; }
-
-/* ── Cards ────────────────────────────────────────────── */
-.pcard {
-    background: #ffffff;
-    border-radius: 12px;
-    border: 1px solid #e8edf2;
-    padding: 28px 32px;
-    margin-bottom: 20px;
-    box-shadow: 0 1px 6px rgba(0,0,0,0.05);
-}
-.pcard-title {
-    font-size: 14px;
-    font-weight: 700;
-    color: #1e293b;
-    letter-spacing: 0.01em;
-    margin-bottom: 20px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-.pcard-title span {
-    font-size: 16px;
-}
-
-/* ── Field Labels ─────────────────────────────────────── */
-.stTextInput label, .stNumberInput label,
-.stTextArea label, .stSelectbox label,
-.stMultiSelect label {
-    font-size: 11px !important;
-    font-weight: 700 !important;
-    letter-spacing: 0.08em !important;
-    text-transform: uppercase !important;
-    color: #64748b !important;
-    margin-bottom: 6px !important;
-}
-
-/* ── Inputs ───────────────────────────────────────────── */
-.stTextInput input,
-.stNumberInput input {
-    border: 1.5px solid #e2e8f0 !important;
-    border-radius: 8px !important;
-    font-size: 14px !important;
-    color: #1e293b !important;
-    background: #f8fafc !important;
-    padding: 10px 14px !important;
-    transition: border 0.2s !important;
-}
-.stTextInput input:focus,
-.stNumberInput input:focus {
-    border-color: #096dd9 !important;
-    background: #ffffff !important;
-    box-shadow: 0 0 0 3px rgba(9,109,217,0.1) !important;
-}
-.stTextArea textarea {
-    border: 1.5px solid #e2e8f0 !important;
-    border-radius: 8px !important;
-    font-size: 14px !important;
-    background: #f8fafc !important;
-    transition: border 0.2s !important;
-}
-.stTextArea textarea:focus {
-    border-color: #096dd9 !important;
-    background: #ffffff !important;
-    box-shadow: 0 0 0 3px rgba(9,109,217,0.1) !important;
-}
-
-/* ── Buttons ──────────────────────────────────────────── */
-.stButton > button {
-    background: linear-gradient(135deg, #1d6ff2 0%, #003a8c 100%) !important;
-    color: #ffffff !important;
-    border: none !important;
-    border-radius: 8px !important;
-    font-size: 13.5px !important;
-    font-weight: 600 !important;
-    padding: 10px 22px !important;
-    letter-spacing: 0.02em !important;
-    transition: all 0.2s ease !important;
-    box-shadow: 0 2px 8px rgba(9,109,217,0.25) !important;
-    width: 100% !important;
-}
-.stButton > button:hover {
-    transform: translateY(-1px) !important;
-    box-shadow: 0 4px 16px rgba(9,109,217,0.35) !important;
-}
-.stButton > button:active {
-    transform: translateY(0) !important;
-}
-
-/* ── Certification Pills ──────────────────────────────── */
-.cert-pill-wrap {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    margin-top: 4px;
-}
-.cert-pill {
-    background: linear-gradient(135deg, #1d6ff2 0%, #003a8c 100%);
-    color: #ffffff;
-    font-size: 12.5px;
-    font-weight: 600;
-    padding: 7px 16px;
-    border-radius: 20px;
-    letter-spacing: 0.03em;
-    box-shadow: 0 2px 6px rgba(9,109,217,0.2);
-}
-.cert-pill-empty {
-    color: #94a3b8;
-    font-size: 13px;
-    font-style: italic;
-    padding: 6px 0;
-}
-
-/* ── Multiselect Tags ─────────────────────────────────── */
-.stMultiSelect [data-baseweb="tag"] {
-    background: linear-gradient(135deg, #1d6ff2 0%, #003a8c 100%) !important;
-    border-radius: 20px !important;
-    padding: 2px 12px !important;
-}
-.stMultiSelect [data-baseweb="tag"] span { color: #fff !important; }
-.stMultiSelect [data-baseweb="tag"] button svg { fill: #fff !important; }
-
-/* ── Risk Cards ───────────────────────────────────────── */
-.risk-card {
-    background: #fff;
-    border: 1px solid #e8edf2;
-    border-left: 5px solid #096dd9;
-    border-radius: 10px;
-    padding: 20px 24px;
-    margin-bottom: 14px;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.04);
-}
-.risk-card.critical  { border-left-color: #ef4444; }
-.risk-card.warning   { border-left-color: #f59e0b; }
-.risk-card.success   { border-left-color: #22c55e; }
-.risk-label {
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    margin-bottom: 6px;
-}
-.risk-title {
-    font-size: 15px;
-    font-weight: 700;
-    color: #1e293b;
-    margin-bottom: 8px;
-}
-.risk-body {
-    font-size: 13.5px;
-    color: #475569;
-    line-height: 1.6;
-}
-
-/* ── Metrics ──────────────────────────────────────────── */
-[data-testid="metric-container"] {
-    background: #ffffff;
-    border: 1px solid #e8edf2;
-    border-radius: 10px;
-    padding: 18px 20px !important;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.04);
-}
-[data-testid="metric-container"] label {
-    font-size: 11px !important;
-    font-weight: 700 !important;
-    letter-spacing: 0.07em !important;
-    text-transform: uppercase !important;
-    color: #64748b !important;
-}
-[data-testid="metric-container"] [data-testid="stMetricValue"] {
-    font-size: 26px !important;
-    font-weight: 700 !important;
-    color: #1e293b !important;
-}
-
-/* ── Alerts ───────────────────────────────────────────── */
-.stAlert { border-radius: 10px !important; font-size: 13.5px !important; }
-
-/* ── Divider ──────────────────────────────────────────── */
-hr { border-color: #e8edf2 !important; margin: 20px 0 !important; }
-
-/* ── Page header ──────────────────────────────────────── */
-.page-header { margin-bottom: 24px; }
-.page-header h2 {
-    font-size: 22px;
-    font-weight: 700;
-    color: #1e293b;
-    margin: 0 0 4px 0;
-}
-.page-header p {
-    font-size: 14px;
-    color: #64748b;
-    margin: 0;
-}
-</style>
+    <style>
+    [data-testid="stHeader"] {
+        background: linear-gradient(90deg, #001529 0%, #003a8c 50%, #096dd9 100%);
+    }
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    .stTabs [data-baseweb="tab"] {
+        background-color: transparent;
+        border-radius: 6px 6px 0 0;
+        padding: 10px 16px;
+        font-weight: 600;
+    }
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(90deg, #096dd9 0%, #003a8c 100%) !important;
+        color: white !important;
+    }
+    .card {
+        background-color: var(--secondary-background-color);
+        color: var(--text-color);
+        padding: 25px;
+        border-radius: 12px;
+        border-left: 8px solid #096dd9;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+    }
+    .critical     { border-left-color: #ff4b4b; }
+    .warning-card { border-left-color: #ffa500; }
+    .success-card { border-left-color: #52c41a; }
+    .stButton>button {
+        background: linear-gradient(90deg, #096dd9 0%, #003a8c 100%);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-weight: bold;
+        width: 100%;
+        transition: 0.3s;
+        padding: 12px;
+    }
+    .stButton>button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(0,58,140,0.3);
+        color: white;
+    }
+    </style>
 """, unsafe_allow_html=True)
 
 
-# --- 3. SESSION STATE ---
+# --- 2. SESSION STATE ---
 def init_state():
     defaults = {
         "empresa": {
             "cnpj": "", "razao_social": "", "capital_social": 0.0,
-            "liquidez_corrente": 1.0, "certificacoes": [], "atestados": ""
+            "liquidez_corrente": 1.0, "certificacoes": []
         },
         "resultado_auditoria": None,
         "resultado_cacador":   None,
         "resultado_juridico":  None,
         "resultado_espiao":    None,
-        "dados_concorrente":   None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -294,9 +79,10 @@ def init_state():
 init_state()
 
 
-# --- 4. HELPERS ---
+# --- 3. UTILITÁRIOS ---
 
 def extrair_texto_pdf(file, max_chars: int = 80_000) -> str:
+    """Extrai texto do PDF (limitado para não estourar o contexto do LLM)."""
     file.seek(0)
     try:
         doc = fitz.open(stream=file.read(), filetype="pdf")
@@ -307,7 +93,7 @@ def extrair_texto_pdf(file, max_chars: int = 80_000) -> str:
     for i in range(len(doc)):
         texto += f"\n[PÁGINA {i+1}]\n{doc[i].get_text()}"
         if len(texto) >= max_chars:
-            texto += "\n[... texto truncado ...]"
+            texto += "\n[... texto truncado para análise ...]"
             break
     return texto
 
@@ -316,15 +102,17 @@ def get_claude(api_key: str) -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=api_key)
 
 
-def chamar_claude(client, system: str, user: str, max_tokens: int = 2048) -> str:
+def chamar_claude(client: anthropic.Anthropic, system: str, user: str,
+                  max_tokens: int = 2048) -> str:
+    """Wrapper seguro para chamadas ao Claude."""
     try:
-        r = client.messages.create(
+        resposta = client.messages.create(
             model="claude-sonnet-4-5",
             max_tokens=max_tokens,
             system=system,
             messages=[{"role": "user", "content": user}]
         )
-        return r.content[0].text
+        return resposta.content[0].text
     except anthropic.AuthenticationError:
         st.error("API Key inválida. Verifique na sidebar.")
         st.stop()
@@ -332,451 +120,479 @@ def chamar_claude(client, system: str, user: str, max_tokens: int = 2048) -> str
         st.error("Limite de requisições atingido. Aguarde e tente novamente.")
         st.stop()
     except Exception as e:
-        st.error(f"Erro ao chamar Claude: {e}")
+        st.error(f"Erro na chamada ao Claude: {e}")
         st.stop()
 
 
-def parse_json(raw: str):
-    try:
-        clean = raw.strip().replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
-    except json.JSONDecodeError:
-        st.error("Erro ao interpretar a resposta da IA. Tente novamente.")
-        st.stop()
-
-
-def perfil_str() -> str:
+def perfil_empresa_str() -> str:
     e = st.session_state.empresa
     return (
         f"Razão Social: {e['razao_social']}\n"
         f"CNPJ: {e['cnpj']}\n"
         f"Capital Social: R$ {e['capital_social']:,.2f}\n"
         f"Liquidez Corrente: {e['liquidez_corrente']}\n"
-        f"Certificações: {', '.join(e['certificacoes']) if e['certificacoes'] else 'Nenhuma'}"
+        f"Certificações: {', '.join(e['certificacoes']) if e['certificacoes'] else 'Nenhuma cadastrada'}"
     )
 
 
-def risk_card(titulo: str, label: str, corpo: str, tipo: str = ""):
-    cor_label = {"critical": "#ef4444", "warning": "#f59e0b",
-                 "success": "#22c55e"}.get(tipo, "#096dd9")
+def render_card(titulo: str, subtitulo: str, corpo: str, classe: str = ""):
+    cor = {
+        "critical":     "#ff4b4b",
+        "warning-card": "#ffa500",
+        "success-card": "#52c41a",
+        "":             "#096dd9",
+    }.get(classe, "#096dd9")
     st.markdown(f"""
-    <div class="risk-card {tipo}">
-        <div class="risk-label" style="color:{cor_label};">{label}</div>
-        <div class="risk-title">{titulo}</div>
-        <div class="risk-body">{corpo.replace(chr(10), '<br>')}</div>
-    </div>""", unsafe_allow_html=True)
-
-
-def section(icon: str, title: str):
-    st.markdown(f"""
-    <div class="pcard-title"><span>{icon}</span> {title}</div>
+    <div class="card {classe}">
+        <small style="color:{cor}; font-weight:bold;">{subtitulo}</small>
+        <h3 style="margin:6px 0 10px 0;">{titulo}</h3>
+        <p style="margin:0;">{corpo.replace(chr(10), '<br>')}</p>
+    </div>
     """, unsafe_allow_html=True)
 
 
-# --- 5. HEADER ---
-st.markdown("""
-<div style="background:#fff; border-bottom:1px solid #e8edf2;
-            padding:16px 32px; margin-bottom:8px;
-            box-shadow:0 1px 4px rgba(0,0,0,0.06);
-            display:flex; align-items:center; gap:12px;">
-    <span style="font-size:20px;">🛡️</span>
-    <div>
-        <div style="font-size:17px; font-weight:700; color:#003a8c; line-height:1.2;">
-            LicitA-IA: Intelligence Unit
-        </div>
-        <div style="font-size:12px; color:#94a3b8; font-weight:500;">
-            Auditoria, Matching e Espionagem Competitiva em Tempo Real.
-        </div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+# --- 4. SIDEBAR ---
+with st.sidebar:
+    st.image("https://img.icons8.com/fluency/96/shield.png", width=80)
+    st.title("LicitA-IA Suite")
 
-# --- API KEY (discreta, no topo direito) ---
-api_col1, api_col2 = st.columns([4, 1])
-with api_col2:
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else ""
     if not api_key:
-        api_key = st.text_input("API Key", type="password", placeholder="sk-ant-...")
-        if api_key:
-            st.success("Motor ativo")
-    else:
-        st.success("Motor ativo")
-
-# --- 6. ABAS ---
-tabs = st.tabs([
-    "🏢 Perfil da Empresa",
-    "🔍 Auditoria de Editais",
-    "🎯 Caçador (Matching)",
-    "⚖️ Advogado AI",
-    "🕵️ Espião de Concorrência",
-    "🔐 The Vault (Certidões)",
-])
-tab_perfil, tab_auditoria, tab_cacador, tab_juridico, tab_espiao, tab_vault = tabs
-
-
-# ══════════════════════════════════════════
-# ABA 1 — PERFIL DA EMPRESA
-# ══════════════════════════════════════════
-with tab_perfil:
-    st.markdown("""
-    <div class="page-header">
-        <h2>🏢 Perfil da Empresa</h2>
-        <p>Configure o DNA corporativo da sua empresa para auditorias personalizadas.</p>
-    </div>""", unsafe_allow_html=True)
-
-    # Card CNPJ
-    st.markdown('<div class="pcard">', unsafe_allow_html=True)
-    st.markdown("**Pesquisa Rápida por CNPJ**")
-    cc1, cc2 = st.columns([4, 1])
-    with cc1:
-        cnpj_input = st.text_input(
-            "CNPJ", label_visibility="collapsed",
-            value=st.session_state.empresa["cnpj"],
-            placeholder="00.000.000/0000-00"
+        api_key = st.text_input(
+            "Anthropic API Key (Claude)",
+            type="password",
+            help="Sua chave da Anthropic para ativar o motor de IA"
         )
-    with cc2:
-        if st.button("Pesquisar CNPJ"):
+
+    st.divider()
+    st.markdown("### Status do Sistema")
+    if api_key:
+        st.success("✅ Motor: Claude Sonnet ativo")
+    else:
+        st.warning("⚠️ Insira a API Key para ativar o motor")
+
+    empresa_nome = st.session_state.empresa["razao_social"] or "Aguardando Setup"
+    st.info(f"🏢 Empresa Ativa:\n{empresa_nome}")
+
+    if st.button("🗑️ Limpar Todos os Resultados"):
+        for k in ["resultado_auditoria", "resultado_cacador",
+                  "resultado_juridico", "resultado_espiao"]:
+            st.session_state[k] = None
+        st.rerun()
+
+# --- CABEÇALHO ---
+st.markdown('<h1 style="font-size:38px; margin-bottom:0;">🛡️ LicitA-IA: Intelligence Unit</h1>',
+            unsafe_allow_html=True)
+st.markdown("<p style='font-size:18px; color:#808080; margin-bottom:30px;'>"
+            "Auditoria, Matching e Espionagem Competitiva em Tempo Real para Licitantes de Elite.</p>",
+            unsafe_allow_html=True)
+
+# --- 5. ABAS ---
+tab_perfil, tab_auditoria, tab_cacador, tab_juridico, tab_espiao = st.tabs([
+    "🏢 1. Perfil (DNA)", "🔍 2. Auditoria de Editais",
+    "🎯 3. Caçador (Match)", "⚖️ 4. Advogado AI", "🕵️ 5. Espião"
+])
+
+
+# ==========================================
+# ABA 1: PERFIL / DNA CORPORATIVO
+# ==========================================
+with tab_perfil:
+    st.subheader("Configuração do DNA Corporativo")
+    st.write("A IA usará este perfil para mapear restrições ocultas em editais de centenas de páginas.")
+
+    col_busca1, col_busca2 = st.columns([3, 1])
+    with col_busca1:
+        cnpj_input = st.text_input(
+            "Busca Automática por CNPJ (apenas números):",
+            value=st.session_state.empresa["cnpj"]
+        )
+    with col_busca2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🔍 Extrair da Receita Federal"):
             cnpj_limpo = "".join(filter(str.isdigit, cnpj_input))
             if len(cnpj_limpo) == 14:
-                with st.spinner("Consultando Receita Federal..."):
+                with st.spinner("Conectando aos servidores do Governo..."):
                     try:
-                        resp = requests.get(
-                            f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}",
-                            timeout=10
-                        )
+                        url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}"
+                        resp = requests.get(url, timeout=10)
                         if resp.status_code == 200:
                             dados = resp.json()
                             st.session_state.empresa.update({
                                 "cnpj":          cnpj_limpo,
                                 "razao_social":  dados.get("razao_social", ""),
+                                # FIX: or 0.0 evita crash se API retornar None
                                 "capital_social": float(dados.get("capital_social") or 0.0),
                             })
                             st.success(f"Empresa encontrada: {dados.get('razao_social')}")
                             st.rerun()
                         else:
-                            st.error("CNPJ não encontrado.")
+                            st.error("CNPJ não encontrado na Receita Federal.")
                     except Exception as e:
                         st.error(f"Erro de conexão: {e}")
             else:
-                st.warning("Digite um CNPJ com 14 dígitos.")
-    st.markdown('</div>', unsafe_allow_html=True)
+                st.warning("O CNPJ deve ter exatamente 14 dígitos.")
 
-    # Card Dados
-    st.markdown('<div class="pcard">', unsafe_allow_html=True)
-    section("🏛️", "Verifique e Complete as Informações")
-    f1, f2 = st.columns(2)
-    with f1:
-        razao = st.text_input("Razão Social",
-                              value=st.session_state.empresa["razao_social"])
-    with f2:
+    st.divider()
+
+    c1, c2 = st.columns(2)
+    with c1:
+        razao   = st.text_input("Razão Social", value=st.session_state.empresa["razao_social"])
         capital = st.number_input("Capital Social Registrado (R$)",
                                   value=float(st.session_state.empresa["capital_social"]),
                                   min_value=0.0, step=1000.0, format="%.2f")
-
-    f3, f4 = st.columns(2)
-    with f3:
+    with c2:
         liquidez = st.number_input("Índice de Liquidez Corrente",
                                    value=float(st.session_state.empresa["liquidez_corrente"]),
                                    min_value=0.0, step=0.1, format="%.2f")
-    with f4:
-        st.write("")  # espaço intencional
-
-    # Certificações
-    st.markdown("**CERTIFICAÇÕES ATIVAS**", help="Selecione todas as certificações vigentes da empresa")
-    certif = st.multiselect(
-        "Certificações", label_visibility="collapsed",
-        options=["ISO 9001", "ISO 14001", "ISO 27001", "SASSMAQ", "PBQP-H", "OHSAS 18001"],
-        default=st.session_state.empresa["certificacoes"]
-    )
-
-    # Pills de preview
-    if certif:
-        pills_html = '<div class="cert-pill-wrap">' + \
-                     "".join(f'<span class="cert-pill">{c}</span>' for c in certif) + \
-                     '</div>'
-        st.markdown(pills_html, unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="cert-pill-wrap"><span class="cert-pill-empty">Nenhuma certificação selecionada</span></div>',
-                    unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
+        certif   = st.multiselect(
+            "Certificações Ativas",
+            ["ISO 9001", "ISO 14001", "ISO 27001", "SASSMAQ", "PBQP-H", "OHSAS 18001"],
+            default=st.session_state.empresa["certificacoes"]
+        )
 
     atestados = st.text_area(
-        "Atestados e Contratos Relevantes",
-        value=st.session_state.empresa.get("atestados", ""),
+        "Descreva brevemente os principais contratos/atestados da empresa:",
         placeholder="Ex: Fornecimento de EPI para Petrobras (2022-2024), contrato de R$ 1,2M...",
-        height=110
+        height=120
     )
 
-    if st.button("💾 Salvar e Validar Cadastro"):
+    if st.button("💾 Blindar Perfil e Salvar"):
+        # FIX: sempre salva CNPJ somente com dígitos
         st.session_state.empresa.update({
-            "cnpj":              "".join(filter(str.isdigit, cnpj_input)),
-            "razao_social":      razao,
-            "capital_social":    capital,
+            "cnpj":             "".join(filter(str.isdigit, cnpj_input)),
+            "razao_social":     razao,
+            "capital_social":   capital,
             "liquidez_corrente": liquidez,
-            "certificacoes":     certif,
-            "atestados":         atestados,
+            "certificacoes":    certif,
+            "atestados":        atestados,
         })
-        st.success("✅ Perfil salvo com sucesso! O motor de auditoria está calibrado.")
-    st.markdown('</div>', unsafe_allow_html=True)
+        st.success("✅ DNA salvo! O Motor de Auditoria está calibrado para a sua empresa.")
 
 
-# ══════════════════════════════════════════
-# ABA 2 — AUDITORIA DE EDITAIS
-# ══════════════════════════════════════════
+# ==========================================
+# ABA 2: AUDITORIA DE EDITAIS (CLAUDE REAL)
+# ==========================================
 with tab_auditoria:
-    st.markdown("""
-    <div class="page-header">
-        <h2>🔍 Auditoria de Editais</h2>
-        <p>Identifique cláusulas abusivas, riscos de desclassificação e pegadinhas jurídicas.</p>
-    </div>""", unsafe_allow_html=True)
+    st.subheader("Auditoria de Conformidade e Riscos com IA")
 
     if not st.session_state.empresa["razao_social"]:
-        st.warning("Configure o Perfil da Empresa antes de auditar.")
+        st.warning("⚠️ Configure o Perfil na Aba 1 antes de auditar.")
     elif not api_key:
-        st.warning("Insira sua API Key para ativar o motor de IA.")
+        st.warning("⚠️ Insira sua API Key na sidebar para ativar a auditoria com IA.")
     else:
-        st.markdown('<div class="pcard">', unsafe_allow_html=True)
-        section("📄", "Upload do Edital")
-        edital_file = st.file_uploader("Faça upload do edital em PDF",
-                                       type="pdf", key="auditoria",
-                                       label_visibility="collapsed")
-        if edital_file:
-            st.caption(f"Arquivo: {edital_file.name} • {edital_file.size/1024:.0f} KB")
-            if st.button("Executar Auditoria Completa"):
-                with st.status("Auditando com Claude...", expanded=True) as status:
-                    st.write("Extraindo texto do edital...")
-                    texto = extrair_texto_pdf(edital_file)
-                    st.write(f"Analisando {len(texto):,} caracteres...")
+        edital_file = st.file_uploader("Upload do Edital (PDF)", type="pdf", key="auditoria")
 
-                    client = get_claude(api_key)
-                    system = """Você é um auditor sênior especialista na Lei 14.133/2021 e Lei 8.666/93.
-Identifique TODAS as cláusulas que podem desclassificar ou prejudicar o licitante.
-Responda APENAS com JSON válido, sem markdown:
+        if edital_file and st.button("🔍 Executar Pente-Fino com IA"):
+            with st.status("Auditando edital com Claude...", expanded=True) as status:
+                st.write("📄 Extraindo texto do PDF...")
+                texto_edital = extrair_texto_pdf(edital_file)
+                total_chars  = len(texto_edital)
+
+                st.write(f"🧠 Analisando {total_chars:,} caracteres com Claude...")
+
+                client = get_claude(api_key)
+
+                system = """Você é um auditor sênior de licitações especialista na Lei 14.133/2021 e Lei 8.666/93.
+Sua função é identificar TODAS as cláusulas que podem desclassificar ou prejudicar o licitante descrito.
+Responda SOMENTE com um JSON válido no formato abaixo, sem markdown, sem texto extra:
 {
-  "riscos": [{
-    "severidade": "CRITICO|ATENCAO|INFO",
-    "categoria": "string",
-    "pagina": "string",
-    "titulo": "string",
-    "descricao": "string",
-    "acao": "string"
-  }],
-  "resumo": "string",
-  "score_seguranca": 0
+  "riscos": [
+    {
+      "severidade": "CRITICO" | "ATENCAO" | "INFO",
+      "categoria": "string (ex: Capacidade Técnica, Habilitação Financeira, Prazo, etc.)",
+      "pagina": "string (ex: Pág. 14 ou Desconhecida)",
+      "titulo": "string curta",
+      "descricao": "string detalhada explicando o risco e o artigo de lei violado",
+      "acao": "string com plano de ação recomendado"
+    }
+  ],
+  "resumo": "string com avaliação geral do edital em 3-4 linhas",
+  "score_seguranca": number (0 a 100, sendo 100 sem riscos)
 }"""
-                    user = f"PERFIL:\n{perfil_str()}\n\nEDITAL:\n{texto}"
-                    raw  = chamar_claude(client, system, user, max_tokens=4096)
-                    st.session_state.resultado_auditoria = parse_json(raw)
-                    status.update(label="Auditoria concluída!", state="complete", expanded=False)
-        st.markdown('</div>', unsafe_allow_html=True)
 
+                user = f"""PERFIL DA EMPRESA LICITANTE:
+{perfil_empresa_str()}
+
+TEXTO DO EDITAL:
+{texto_edital}
+
+Analise o edital completo, cruze com o perfil da empresa e retorne o JSON com todos os riscos encontrados."""
+
+                raw = chamar_claude(client, system, user, max_tokens=4096)
+
+                # Parse seguro do JSON
+                try:
+                    clean = raw.strip().replace("```json", "").replace("```", "")
+                    st.session_state.resultado_auditoria = json.loads(clean)
+                except json.JSONDecodeError:
+                    st.error("Erro ao interpretar resposta da IA. Tente novamente.")
+                    st.session_state.resultado_auditoria = None
+                    st.stop()
+
+                status.update(label="✅ Auditoria Concluída!", state="complete", expanded=False)
+
+        # Exibição de resultados
         if st.session_state.resultado_auditoria:
-            res      = st.session_state.resultado_auditoria
-            riscos   = res.get("riscos", [])
-            score    = res.get("score_seguranca", 0)
-            criticos = [r for r in riscos if r["severidade"] == "CRITICO"]
-            atencoes = [r for r in riscos if r["severidade"] == "ATENCAO"]
+            resultado = st.session_state.resultado_auditoria
+            riscos    = resultado.get("riscos", [])
+            score     = resultado.get("score_seguranca", 0)
+            criticos  = [r for r in riscos if r["severidade"] == "CRITICO"]
+            atencoes  = [r for r in riscos if r["severidade"] == "ATENCAO"]
 
+            # Métricas
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Score de Segurança", f"{score}/100")
-            m2.metric("Riscos Críticos",    len(criticos))
-            m3.metric("Atenções",           len(atencoes))
-            m4.metric("Total",              len(riscos))
+            m1.metric("Score de Segurança", f"{score}/100",
+                      delta_color="inverse" if score < 60 else "normal")
+            m2.metric("Riscos Críticos",  len(criticos), delta_color="inverse")
+            m3.metric("Pontos de Atenção", len(atencoes), delta_color="off")
+            m4.metric("Total de Riscos",   len(riscos))
 
-            st.markdown("<br>", unsafe_allow_html=True)
-            risk_card("Avaliação Geral", "RESUMO EXECUTIVO", res.get("resumo", ""))
+            # Resumo
+            st.markdown("---")
+            render_card("Avaliação Geral do Edital", "📋 RESUMO EXECUTIVO",
+                        resultado.get("resumo", ""))
 
+            # Cards de risco ordenados por severidade
+            st.markdown("### Riscos Identificados")
             ordem = {"CRITICO": 0, "ATENCAO": 1, "INFO": 2}
             for r in sorted(riscos, key=lambda x: ordem.get(x["severidade"], 3)):
-                tipo  = "critical" if r["severidade"] == "CRITICO" else \
-                        "warning"  if r["severidade"] == "ATENCAO"  else ""
-                corpo = f"{r['descricao']}<br><br><b>Plano de Ação:</b> {r.get('acao','N/A')}"
-                risk_card(
+                classe = "critical" if r["severidade"] == "CRITICO" else \
+                         "warning-card" if r["severidade"] == "ATENCAO" else ""
+                corpo  = f"{r['descricao']}\n\n💡 <b>Plano de Ação:</b> {r.get('acao', 'N/A')}"
+                render_card(
                     r["titulo"],
-                    f"{r['severidade']} · {r.get('pagina','?')} · {r.get('categoria','')}",
-                    corpo, tipo
+                    f"{'🚨' if r['severidade'] == 'CRITICO' else '⚠️'} {r['severidade']} | {r['pagina']} | {r['categoria']}",
+                    corpo,
+                    classe
                 )
 
 
-# ══════════════════════════════════════════
-# ABA 3 — CAÇADOR (MATCHING)
-# ══════════════════════════════════════════
+# ==========================================
+# ABA 3: CAÇADOR DE OPORTUNIDADES
+# ==========================================
 with tab_cacador:
-    st.markdown("""
-    <div class="page-header">
-        <h2>🎯 Caçador (Matching)</h2>
-        <p>Mapeamento inteligente de oportunidades compatíveis com seu perfil.</p>
-    </div>""", unsafe_allow_html=True)
+    st.subheader("🎯 Caçador: Matching Inteligente de Oportunidades")
+    st.write("Descreva o perfil de licitações que deseja e a IA encontra e avalia as melhores oportunidades.")
 
     if not api_key:
-        st.warning("Insira sua API Key para ativar o Caçador.")
+        st.warning("⚠️ Insira sua API Key na sidebar.")
     else:
-        st.markdown('<div class="pcard">', unsafe_allow_html=True)
-        section("🔎", "Critérios de Busca")
-        c1, c2 = st.columns(2)
-        with c1:
-            segmento = st.text_input("Segmento / Objeto",
-                                     placeholder="Ex: fornecimento de uniformes, limpeza predial...")
-            uf = st.selectbox("Estado", ["Todos","SP","RJ","MG","RS","PR","SC","BA",
-                                         "GO","DF","PE","CE","AM","PA","MT","MS","ES",
-                                         "RN","PB","AL","SE","PI","MA","TO","RO","AC","AP","RR"])
-        with c2:
-            v_min = st.number_input("Valor Mínimo (R$)", value=0.0, step=10000.0, format="%.2f")
-            v_max = st.number_input("Valor Máximo (R$)", value=1_000_000.0, step=10000.0, format="%.2f")
-            modal = st.multiselect("Modalidades", ["Pregão Eletrônico","Concorrência",
-                                                   "Tomada de Preços","Convite","RDC"],
-                                   default=["Pregão Eletrônico"])
+        col1, col2 = st.columns(2)
+        with col1:
+            segmento = st.text_input(
+                "Segmento / Objeto de interesse:",
+                placeholder="Ex: fornecimento de uniformes, limpeza predial, TI..."
+            )
+            uf = st.selectbox("Estado de interesse:", [
+                "Todos", "SP", "RJ", "MG", "RS", "PR", "SC", "BA", "GO", "DF",
+                "PE", "CE", "AM", "PA", "MT", "MS", "ES", "RN", "PB", "AL",
+                "SE", "PI", "MA", "TO", "RO", "AC", "AP", "RR"
+            ])
+        with col2:
+            valor_min = st.number_input("Valor mínimo estimado (R$)", value=0.0,
+                                        step=10000.0, format="%.2f")
+            valor_max = st.number_input("Valor máximo estimado (R$)", value=1_000_000.0,
+                                        step=10000.0, format="%.2f")
+            modalidade = st.multiselect(
+                "Modalidades aceitas:",
+                ["Pregão Eletrônico", "Concorrência", "Tomada de Preços", "Convite", "RDC"],
+                default=["Pregão Eletrônico"]
+            )
 
-        atst = st.text_area("Atestados e Experiências",
-                            value=st.session_state.empresa.get("atestados",""),
-                            placeholder="Ex: Fornecimento de 5.000 uniformes para Prefeitura de SP...",
-                            height=90)
-        if st.button("Ativar Caçador de Oportunidades"):
-            with st.spinner("Mapeando oportunidades..."):
+        atestados_cacador = st.text_area(
+            "Descreva seus atestados e experiências relevantes:",
+            value=st.session_state.empresa.get("atestados", ""),
+            placeholder="Ex: Fornecimento de 5.000 uniformes para Prefeitura de SP (2023)...",
+            height=100
+        )
+
+        if st.button("🚀 Ativar Caçador de Oportunidades"):
+            with st.spinner("A IA está mapeando oportunidades e calculando compatibilidade..."):
                 client = get_claude(api_key)
-                system = """Você é especialista em prospecção de licitações públicas no Brasil.
-Responda SOMENTE com JSON válido:
+
+                system = """Você é um especialista em prospecção de licitações públicas no Brasil.
+Sua função é avaliar a compatibilidade do perfil da empresa com o segmento desejado e gerar um relatório estratégico de oportunidades.
+Responda SOMENTE com JSON válido no formato:
 {
-  "compatibilidade_geral": 0,
-  "analise": "string",
-  "oportunidades": [{
-    "titulo":"string","orgao_exemplo":"string","valor_estimado":"string",
-    "compatibilidade":0,"pontos_fortes":["string"],"pontos_fracos":["string"],
-    "proximos_passos":"string"
-  }],
-  "recomendacoes": ["string"]
+  "compatibilidade_geral": number (0 a 100),
+  "analise": "string com análise detalhada do potencial competitivo",
+  "oportunidades": [
+    {
+      "titulo": "string descrevendo o tipo de licitação",
+      "orgao_exemplo": "string com órgão público típico que contrata isso",
+      "valor_estimado": "string (faixa de valor)",
+      "compatibilidade": number (0 a 100),
+      "pontos_fortes": ["string"],
+      "pontos_fracos": ["string"],
+      "proximos_passos": "string"
+    }
+  ],
+  "recomendacoes": ["string com recomendação estratégica"]
 }"""
-                user = (f"PERFIL:\n{perfil_str()}\nAtestados: {atst}\n\n"
-                        f"Segmento: {segmento}, Estado: {uf}, "
-                        f"Valor: R${v_min:,.0f}-R${v_max:,.0f}, Modalidades: {', '.join(modal)}")
-                st.session_state.resultado_cacador = parse_json(
-                    chamar_claude(client, system, user, max_tokens=3000)
-                )
-        st.markdown('</div>', unsafe_allow_html=True)
+
+                user = f"""PERFIL DA EMPRESA:
+{perfil_empresa_str()}
+Atestados/Experiências: {atestados_cacador}
+
+CRITÉRIOS DE BUSCA:
+Segmento: {segmento}
+Estado: {uf}
+Faixa de valor: R$ {valor_min:,.2f} a R$ {valor_max:,.2f}
+Modalidades: {', '.join(modalidade)}
+
+Avalie a compatibilidade e gere análise estratégica de oportunidades de licitação para este perfil."""
+
+                raw = chamar_claude(client, system, user, max_tokens=3000)
+                try:
+                    clean = raw.strip().replace("```json", "").replace("```", "")
+                    st.session_state.resultado_cacador = json.loads(clean)
+                except json.JSONDecodeError:
+                    st.error("Erro ao interpretar resposta. Tente novamente.")
+                    st.stop()
 
         if st.session_state.resultado_cacador:
             res  = st.session_state.resultado_cacador
             opps = res.get("oportunidades", [])
-            c1, c2 = st.columns(2)
-            c1.metric("Compatibilidade Geral",  f"{res.get('compatibilidade_geral',0)}%")
-            c2.metric("Oportunidades Mapeadas", len(opps))
-            risk_card("Análise Estratégica", "DIAGNÓSTICO DE POTENCIAL", res.get("analise",""))
-            for opp in sorted(opps, key=lambda x: x.get("compatibilidade",0), reverse=True):
-                comp  = opp.get("compatibilidade", 0)
-                tipo  = "success" if comp>=70 else ("warning" if comp>=40 else "critical")
-                corpo = (f"<b>Órgão:</b> {opp.get('orgao_exemplo','N/A')}<br>"
-                         f"<b>Valor:</b> {opp.get('valor_estimado','N/A')}<br>"
-                         f"<b>Pontos Fortes:</b> {', '.join(opp.get('pontos_fortes',[]))}<br>"
-                         f"<b>Pontos Fracos:</b> {', '.join(opp.get('pontos_fracos',[]))}<br>"
-                         f"<b>Próximos Passos:</b> {opp.get('proximos_passos','N/A')}")
-                risk_card(opp["titulo"], f"MATCH: {comp}%", corpo, tipo)
-            st.markdown("**Recomendações Estratégicas**")
+
+            st.markdown("---")
+            m1, m2 = st.columns(2)
+            m1.metric("Compatibilidade Geral", f"{res.get('compatibilidade_geral', 0)}%")
+            m2.metric("Oportunidades Mapeadas", len(opps))
+
+            render_card("Análise Estratégica", "🎯 DIAGNÓSTICO DE POTENCIAL",
+                        res.get("analise", ""))
+
+            for opp in sorted(opps, key=lambda x: x.get("compatibilidade", 0), reverse=True):
+                comp   = opp.get("compatibilidade", 0)
+                classe = "success-card" if comp >= 70 else ("warning-card" if comp >= 40 else "critical")
+                corpo  = (
+                    f"<b>Órgão Típico:</b> {opp.get('orgao_exemplo', 'N/A')}<br>"
+                    f"<b>Valor Estimado:</b> {opp.get('valor_estimado', 'N/A')}<br>"
+                    f"<b>✅ Pontos Fortes:</b> {', '.join(opp.get('pontos_fortes', []))}<br>"
+                    f"<b>⚠️ Pontos Fracos:</b> {', '.join(opp.get('pontos_fracos', []))}<br>"
+                    f"<b>🚀 Próximos Passos:</b> {opp.get('proximos_passos', 'N/A')}"
+                )
+                render_card(opp["titulo"],
+                            f"🎯 MATCH: {comp}%",
+                            corpo, classe)
+
+            st.markdown("### 📋 Recomendações Estratégicas")
             for rec in res.get("recomendacoes", []):
                 st.markdown(f"- {rec}")
 
 
-# ══════════════════════════════════════════
-# ABA 4 — ADVOGADO AI
-# ══════════════════════════════════════════
+# ==========================================
+# ABA 4: ADVOGADO AI
+# ==========================================
 with tab_juridico:
-    st.markdown("""
-    <div class="page-header">
-        <h2>⚖️ Advogado AI</h2>
-        <p>Redação automática de peças jurídicas fundamentadas na Lei 14.133/2021.</p>
-    </div>""", unsafe_allow_html=True)
+    st.subheader("⚖️ Advogado AI: Redação de Peças Jurídicas")
+    st.write("Gere impugnações, recursos administrativos e pedidos de esclarecimento com base na Lei 14.133/2021.")
 
     if not api_key:
-        st.warning("Insira sua API Key para usar o Advogado AI.")
+        st.warning("⚠️ Insira sua API Key na sidebar.")
     else:
-        st.markdown('<div class="pcard">', unsafe_allow_html=True)
-        section("📝", "Configuração da Peça")
-        tipo_peca = st.selectbox("Tipo de Peça", [
+        tipo_peca = st.selectbox("Tipo de Peça Jurídica:", [
             "Impugnação de Edital",
             "Recurso Administrativo (pós-julgamento)",
             "Pedido de Esclarecimento",
             "Contrarrazões de Recurso",
             "Impugnação de Habilitação de Concorrente",
         ])
-        j1, j2 = st.columns(2)
-        with j1:
-            orgao       = st.text_input("Órgão / Entidade Licitante",
-                                        placeholder="Ex: Prefeitura Municipal de Campinas")
-            num_edital  = st.text_input("Número do Edital",
-                                        placeholder="Ex: Pregão Eletrônico 001/2025")
-        with j2:
-            objeto      = st.text_input("Objeto da Licitação",
-                                        placeholder="Ex: Aquisição de uniformes profissionais")
-            data_sessao = st.text_input("Data da Sessão / Prazo",
-                                        placeholder="Ex: 20/01/2025")
-        fundamento = st.text_area("Fundamento / O que deseja contestar",
-                                  placeholder=(
-                                      "Ex: O edital exige ISO 9001 no item 9.4.1 como requisito "
-                                      "de habilitação técnica. Esta exigência restringe a "
-                                      "competitividade sem justificativa, ferindo o Art. 9º da Lei 14.133..."
-                                  ), height=140)
-        if st.button("Redigir Peça Jurídica"):
+
+        col1, col2 = st.columns(2)
+        with col1:
+            orgao       = st.text_input("Órgão / Entidade Licitante:", placeholder="Ex: Prefeitura Municipal de Campinas")
+            num_edital  = st.text_input("Número do Edital / Pregão:", placeholder="Ex: Pregão Eletrônico 001/2025")
+        with col2:
+            objeto      = st.text_input("Objeto da Licitação:", placeholder="Ex: Aquisição de uniformes profissionais")
+            data_sesssao = st.text_input("Data da Sessão/Prazo:", placeholder="Ex: 20/01/2025")
+
+        fundamento = st.text_area(
+            "Descreva o problema / fundamento da peça (o que quer contestar ou esclarecer):",
+            placeholder=(
+                "Ex: O edital exige ISO 9001 no item 9.4.1 como requisito de habilitação técnica "
+                "para fornecimento de uniformes. Esta exigência é ilegal pois restringe a "
+                "competitividade sem justificativa técnica, ferindo o Art. 9º da Lei 14.133/2021..."
+            ),
+            height=150
+        )
+
+        if st.button("⚖️ Redigir Peça Jurídica com IA"):
             if not fundamento or not orgao:
                 st.warning("Preencha ao menos o Órgão e o Fundamento.")
             else:
                 with st.spinner(f"Redigindo {tipo_peca}..."):
                     client = get_claude(api_key)
-                    system = """Você é advogado especialista em Direito Administrativo e Licitações com 20 anos de experiência.
-Redija peças jurídicas formais fundamentadas na Lei 14.133/2021, Lei 8.666/93, jurisprudência do TCU.
-Inclua: cabeçalho, qualificação das partes, dos fatos, fundamentos jurídicos com artigos e súmulas, pedido e fechamento."""
-                    user = (f"Peça: {tipo_peca}\nEmpresa:\n{perfil_str()}\n\n"
-                            f"Órgão: {orgao}\nEdital: {num_edital}\nObjeto: {objeto}\n"
-                            f"Data: {data_sessao}\n\nFundamento:\n{fundamento}")
-                    peca = chamar_claude(client, system, user, max_tokens=4096)
-                    st.session_state.resultado_juridico = {"tipo": tipo_peca, "texto": peca}
-        st.markdown('</div>', unsafe_allow_html=True)
+
+                    system = """Você é um advogado especialista em Direito Administrativo e Licitações Públicas com 20 anos de experiência.
+Redija peças jurídicas formais, fundamentadas na Lei 14.133/2021, Lei 8.666/93, jurisprudência do TCU e princípios do Direito Administrativo.
+A peça deve ser profissional, bem estruturada, com linguagem técnica e argumentação sólida.
+Inclua: cabeçalho formal, qualificação das partes, dos fatos, fundamentos jurídicos (com artigos de lei e súmulas), pedido e fechamento."""
+
+                    user = f"""Redija uma peça de {tipo_peca} com os seguintes dados:
+
+EMPRESA RECORRENTE:
+{perfil_empresa_str()}
+
+DADOS DO PROCESSO:
+Órgão/Entidade: {orgao}
+Número do Edital: {num_edital}
+Objeto: {objeto}
+Data da Sessão/Prazo: {data_sesssao}
+
+FUNDAMENTO / PROBLEMA A SER CONTESTADO:
+{fundamento}
+
+Redija a peça completa, formal e fundamentada."""
+
+                    peça = chamar_claude(client, system, user, max_tokens=4096)
+                    st.session_state.resultado_juridico = {"tipo": tipo_peca, "texto": peça}
 
         if st.session_state.resultado_juridico:
             res = st.session_state.resultado_juridico
-            st.markdown(f"**{res['tipo']}**")
+            st.markdown("---")
+            st.markdown(f"### 📄 {res['tipo']}")
             st.markdown(
-                f"<div style='background:#fff; border:1px solid #e8edf2; border-radius:10px; "
-                f"padding:32px; white-space:pre-wrap; font-family:Georgia,serif; "
-                f"font-size:14px; line-height:1.9; color:#1e293b;'>{res['texto']}</div>",
+                f"<div style='background:var(--secondary-background-color); padding:30px; "
+                f"border-radius:12px; white-space:pre-wrap; font-family:serif; line-height:1.8;'>"
+                f"{res['texto']}</div>",
                 unsafe_allow_html=True
             )
-            st.download_button("⬇️ Baixar Peça (.txt)", data=res["texto"],
-                               file_name=f"{tipo_peca.replace(' ','_').lower()}.txt",
-                               mime="text/plain")
+            st.download_button(
+                label="⬇️ Baixar Peça em .txt",
+                data=res["texto"],
+                file_name=f"{res['tipo'].replace(' ', '_').lower()}.txt",
+                mime="text/plain"
+            )
 
 
-# ══════════════════════════════════════════
-# ABA 5 — ESPIÃO DE CONCORRÊNCIA
-# ══════════════════════════════════════════
+# ==========================================
+# ABA 5: ESPIÃO (INTELIGÊNCIA COMPETITIVA)
+# ==========================================
 with tab_espiao:
-    st.markdown("""
-    <div class="page-header">
-        <h2>🕵️ Espião de Concorrência</h2>
-        <p>Inteligência competitiva para identificar padrões e estratégias dos seus concorrentes.</p>
-    </div>""", unsafe_allow_html=True)
+    st.subheader("🕵️ Espião: Inteligência Competitiva em Licitações")
+    st.write("Analise o histórico de um concorrente, identifique padrões e descubra como vencê-lo.")
 
     if not api_key:
-        st.warning("Insira sua API Key para usar o Espião.")
+        st.warning("⚠️ Insira sua API Key na sidebar.")
     else:
-        st.markdown('<div class="pcard">', unsafe_allow_html=True)
-        section("🔎", "Identificação do Concorrente")
-        e1, e2 = st.columns([3, 1])
-        with e1:
-            cnpj_conc = st.text_input("CNPJ do Concorrente",
-                                      placeholder="00.000.000/0000-00",
-                                      label_visibility="collapsed")
-        with e2:
-            if st.button("Pesquisar Concorrente"):
-                cnpj_c = "".join(filter(str.isdigit, cnpj_conc))
+        col1, col2 = st.columns(2)
+        with col1:
+            cnpj_concorrente = st.text_input("CNPJ do Concorrente (apenas números):",
+                                             placeholder="00000000000000")
+            if st.button("🔍 Buscar Dados do Concorrente"):
+                cnpj_c = "".join(filter(str.isdigit, cnpj_concorrente))
                 if len(cnpj_c) == 14:
-                    with st.spinner("Consultando..."):
+                    with st.spinner("Consultando Receita Federal..."):
                         try:
                             resp = requests.get(
                                 f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_c}", timeout=10
                             )
                             if resp.status_code == 200:
-                                st.session_state["dados_concorrente"] = resp.json()
-                                st.rerun()
+                                d = resp.json()
+                                st.session_state["dados_concorrente"] = d
+                                st.success(f"Encontrado: {d.get('razao_social')}")
                             else:
                                 st.error("CNPJ não encontrado.")
                         except Exception as e:
@@ -784,146 +600,125 @@ with tab_espiao:
                 else:
                     st.warning("CNPJ inválido.")
 
-        if st.session_state["dados_concorrente"]:
-            d = st.session_state["dados_concorrente"]
-            cc1, cc2, cc3, cc4 = st.columns(4)
-            cc1.metric("Razão Social",  d.get("razao_social","N/A")[:22]+"…" if len(d.get("razao_social",""))>22 else d.get("razao_social","N/A"))
-            cc2.metric("Capital Social", f"R$ {float(d.get('capital_social') or 0):,.0f}")
-            cc3.metric("Porte",          d.get("porte","N/A"))
-            cc4.metric("Situação",       d.get("descricao_situacao_cadastral","N/A"))
-        st.markdown('</div>', unsafe_allow_html=True)
+        with col2:
+            if "dados_concorrente" in st.session_state:
+                d = st.session_state["dados_concorrente"]
+                st.markdown(f"**Empresa:** {d.get('razao_social', 'N/A')}")
+                st.markdown(f"**Capital Social:** R$ {float(d.get('capital_social') or 0):,.2f}")
+                st.markdown(f"**Porte:** {d.get('porte', 'N/A')}")
+                st.markdown(f"**Situação:** {d.get('descricao_situacao_cadastral', 'N/A')}")
 
-        st.markdown('<div class="pcard">', unsafe_allow_html=True)
-        section("📋", "Inteligência Competitiva")
-        historico = st.text_area("Histórico e comportamento do concorrente",
-                                 placeholder=(
-                                     "Ex: A empresa costuma praticar desconto de 15-20% no lance final. "
-                                     "Ganhou os pregões 001/2024 e 005/2024 da Prefeitura de SP..."
-                                 ), height=130)
-        seg_esp = st.text_input("Segmento da disputa",
-                                placeholder="Ex: Fornecimento de EPI, Limpeza Predial...")
-        if st.button("Gerar Dossiê Competitivo"):
-            if not historico:
-                st.warning("Descreva o comportamento do concorrente.")
+        st.divider()
+
+        historico_concorrente = st.text_area(
+            "Cole aqui informações sobre o concorrente (contratos anteriores, estratégias conhecidas, licitações ganhas):",
+            placeholder=(
+                "Ex: A empresa XYZ Ltda costuma praticar desconto de 15-20% no lance final. "
+                "Ganhou os pregões 001/2024 e 005/2024 da Prefeitura de SP. "
+                "Possui certificação ISO 9001 e contrato vigente com o Estado de SP..."
+            ),
+            height=150
+        )
+
+        segmento_espiao = st.text_input(
+            "Segmento da disputa:",
+            placeholder="Ex: Fornecimento de EPI, Limpeza Predial..."
+        )
+
+        if st.button("🕵️ Gerar Dossiê Competitivo"):
+            if not historico_concorrente:
+                st.warning("Insira informações sobre o concorrente.")
             else:
-                with st.spinner("Montando dossiê..."):
+                with st.spinner("A IA está analisando padrões e montando o dossiê..."):
                     client = get_claude(api_key)
-                    d = st.session_state.get("dados_concorrente") or {}
-                    dados_str = (
-                        f"Razão Social: {d.get('razao_social','N/A')}\n"
-                        f"Capital: R$ {float(d.get('capital_social') or 0):,.2f}\n"
-                        f"Porte: {d.get('porte','N/A')}"
-                    ) if d else "Dados não carregados."
-                    system = """Você é estrategista de inteligência competitiva em licitações.
-Responda SOMENTE com JSON válido:
+
+                    dados_concorrente_str = ""
+                    if "dados_concorrente" in st.session_state:
+                        d = st.session_state["dados_concorrente"]
+                        dados_concorrente_str = (
+                            f"Razão Social: {d.get('razao_social')}\n"
+                            f"Capital Social: R$ {float(d.get('capital_social') or 0):,.2f}\n"
+                            f"Porte: {d.get('porte')}\n"
+                            f"Situação: {d.get('descricao_situacao_cadastral')}\n"
+                            f"CNAEs: {', '.join([c.get('descricao', '') for c in d.get('cnaes_secundarios', [])[:3]])}"
+                        )
+
+                    system = """Você é um estrategista de inteligência competitiva especializado em licitações públicas.
+Analise os dados do concorrente e gere um dossiê estratégico para ajudar a empresa cliente a vencer a disputa.
+Responda SOMENTE com JSON válido no formato:
 {
-  "perfil_competitivo":"string",
-  "pontos_vulneraveis":["string"],
-  "estrategias_vencer":[{"estrategia":"string","descricao":"string","risco":"BAIXO|MEDIO|ALTO"}],
-  "alerta_dumping": false,
-  "preco_referencia":"string",
-  "recomendacao_final":"string"
+  "perfil_competitivo": "string com análise do concorrente",
+  "pontos_vulneraveis": ["string"],
+  "estrategias_vencer": [
+    {
+      "estrategia": "string",
+      "descricao": "string detalhada",
+      "risco": "BAIXO" | "MEDIO" | "ALTO"
+    }
+  ],
+  "alerta_dumping": boolean,
+  "preco_referencia": "string com estimativa de preço que o concorrente praticará",
+  "recomendacao_final": "string com recomendação executiva de 3-4 linhas"
 }"""
-                    user = (f"MINHA EMPRESA:\n{perfil_str()}\n\n"
-                            f"CONCORRENTE:\n{dados_str}\n\nHistórico: {historico}\nSegmento: {seg_esp}")
-                    st.session_state.resultado_espiao = parse_json(
-                        chamar_claude(client, system, user, max_tokens=3000)
-                    )
-        st.markdown('</div>', unsafe_allow_html=True)
+
+                    user = f"""MINHA EMPRESA (cliente):
+{perfil_empresa_str()}
+
+DADOS DO CONCORRENTE:
+{dados_concorrente_str}
+
+HISTÓRICO / INTELIGÊNCIA DO CONCORRENTE:
+{historico_concorrente}
+
+SEGMENTO DA DISPUTA: {segmento_espiao}
+
+Monte o dossiê competitivo completo e as estratégias para vencer este concorrente."""
+
+                    raw = chamar_claude(client, system, user, max_tokens=3000)
+                    try:
+                        clean = raw.strip().replace("```json", "").replace("```", "")
+                        st.session_state.resultado_espiao = json.loads(clean)
+                    except json.JSONDecodeError:
+                        st.error("Erro ao interpretar resposta. Tente novamente.")
+                        st.stop()
 
         if st.session_state.resultado_espiao:
             res = st.session_state.resultado_espiao
+
+            st.markdown("---")
+
+            # Alerta de Dumping
             if res.get("alerta_dumping"):
-                risk_card("Risco de Dumping Detectado",
-                          "ALERTA ESTRATÉGICO",
-                          "Padrão de preços predatórios identificado. Prepare impugnação preventiva.",
-                          "critical")
-            risk_card("Perfil Competitivo", "DOSSIÊ DO CONCORRENTE",
-                      res.get("perfil_competitivo",""))
-            st.metric("Estimativa de Preço do Concorrente", res.get("preco_referencia","N/A"))
+                render_card(
+                    "⚠️ Risco de Dumping Detectado",
+                    "🚨 ALERTA ESTRATÉGICO",
+                    "A IA identificou padrão de preços predatórios. Prepare impugnação preventiva se o lance final ficar abaixo do custo operacional.",
+                    "critical"
+                )
+
+            render_card("Perfil Competitivo", "🕵️ DOSSIÊ DO CONCORRENTE",
+                        res.get("perfil_competitivo", ""), "")
+
+            st.markdown(f"**💰 Estimativa de Preço do Concorrente:** {res.get('preco_referencia', 'N/A')}")
+
+            st.markdown("### 🎯 Estratégias para Vencer")
             for est in res.get("estrategias_vencer", []):
-                risco = est.get("risco","BAIXO")
-                tipo  = "critical" if risco=="ALTO" else ("warning" if risco=="MEDIO" else "success")
-                risk_card(est["estrategia"], f"ESTRATÉGIA · RISCO {risco}",
-                          est.get("descricao",""), tipo)
-            st.markdown("**Pontos Vulneráveis do Concorrente**")
-            for p in res.get("pontos_vulneraveis",[]):
-                st.markdown(f"- {p}")
-            risk_card("Recomendação Executiva", "PLANO FINAL",
-                      res.get("recomendacao_final",""), "success")
+                risco  = est.get("risco", "BAIXO")
+                classe = "critical" if risco == "ALTO" else ("warning-card" if risco == "MEDIO" else "success-card")
+                render_card(
+                    est.get("estrategia", ""),
+                    f"⚡ ESTRATÉGIA | Risco: {risco}",
+                    est.get("descricao", ""),
+                    classe
+                )
 
+            st.markdown("### 🔓 Pontos Vulneráveis do Concorrente")
+            for ponto in res.get("pontos_vulneraveis", []):
+                st.markdown(f"- {ponto}")
 
-# ══════════════════════════════════════════
-# ABA 6 — THE VAULT (CERTIDÕES)
-# ══════════════════════════════════════════
-with tab_vault:
-    st.markdown("""
-    <div class="page-header">
-        <h2>🔐 The Vault — Gestão de Certidões</h2>
-        <p>Controle os vencimentos das certidões da sua empresa e receba alertas de renovação.</p>
-    </div>""", unsafe_allow_html=True)
-
-    if not api_key:
-        st.warning("Insira sua API Key para usar o Vault.")
-    else:
-        CERTIDOES = [
-            "CND Federal (Receita Federal + PGFN)",
-            "CND Estadual",
-            "CND Municipal",
-            "CRF — FGTS (Caixa Econômica)",
-            "CNDT — Débitos Trabalhistas (TST)",
-            "Certidão de Falência e Concordata",
-            "Balanço Patrimonial",
-            "Registro no CREA / CRM / CRC (se aplicável)",
-        ]
-
-        if "vault" not in st.session_state:
-            st.session_state.vault = {c: {"validade": "", "status": "Não cadastrada"} for c in CERTIDOES}
-
-        st.markdown('<div class="pcard">', unsafe_allow_html=True)
-        section("🗂️", "Painel de Certidões")
-
-        v1, v2, v3 = st.columns(3)
-        ok     = sum(1 for v in st.session_state.vault.values() if v["status"] == "Válida")
-        alerta = sum(1 for v in st.session_state.vault.values() if v["status"] == "Vencendo")
-        venc   = sum(1 for v in st.session_state.vault.values() if v["status"] == "Vencida")
-        v1.metric("Certidões Válidas",   ok)
-        v2.metric("Vencendo em Breve",   alerta)
-        v3.metric("Vencidas / Ausentes", venc + sum(1 for v in st.session_state.vault.values() if v["status"] == "Não cadastrada"))
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        for cert in CERTIDOES:
-            dados = st.session_state.vault[cert]
-            cor   = {"Válida":"#22c55e","Vencendo":"#f59e0b","Vencida":"#ef4444"}.get(dados["status"],"#94a3b8")
-            with st.expander(f"{cert}  —  **{dados['status']}**"):
-                col_a, col_b, col_c = st.columns([2, 2, 1])
-                with col_a:
-                    nova_val = st.text_input("Validade (DD/MM/AAAA)",
-                                             value=dados["validade"],
-                                             key=f"vault_val_{cert}")
-                with col_b:
-                    novo_status = st.selectbox("Status", ["Não cadastrada","Válida","Vencendo","Vencida"],
-                                               index=["Não cadastrada","Válida","Vencendo","Vencida"].index(dados["status"]),
-                                               key=f"vault_st_{cert}")
-                with col_c:
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    if st.button("Salvar", key=f"vault_save_{cert}"):
-                        st.session_state.vault[cert] = {"validade": nova_val, "status": novo_status}
-                        st.success("Salvo!")
-                        st.rerun()
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        if st.button("Analisar Certidões com IA"):
-            with st.spinner("Analisando situação documental..."):
-                client  = get_claude(api_key)
-                resumo  = "\n".join(f"- {c}: {v['status']} (validade: {v['validade'] or 'N/A'})"
-                                    for c, v in st.session_state.vault.items())
-                system  = "Você é especialista em habilitação jurídica em licitações públicas."
-                user    = (f"Analise as certidões da empresa {st.session_state.empresa['razao_social']} "
-                           f"e indique riscos de inabilitação, urgências de renovação e boas práticas:\n{resumo}")
-                analise = chamar_claude(client, system, user, max_tokens=1500)
-                risk_card("Análise Documental", "DIAGNÓSTICO DO VAULT", analise)
-
-        st.markdown('</div>', unsafe_allow_html=True)
+            render_card(
+                "Recomendação Executiva",
+                "🏆 PLANO FINAL",
+                res.get("recomendacao_final", ""),
+                "success-card"
+            )
