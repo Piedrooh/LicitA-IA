@@ -485,12 +485,9 @@ with st.sidebar:
         st.rerun()
 
     # ── Rodapé ────────────────────────────────────────────
-    # Espaço para o rodapé não sobrepor o botão
-    st.markdown("<div style='height:110px'></div>", unsafe_allow_html=True)
     st.markdown("""
-    <div style="position:fixed; bottom:0; left:0; width:245px;
-                padding:14px 20px; border-top:1px solid rgba(255,255,255,0.08);
-                background:#001529; z-index:0; pointer-events:none;">
+    <div style="margin-top:32px; padding-top:16px;
+                border-top:1px solid rgba(255,255,255,0.08);">
         <div style="font-size:11px; color:rgba(255,255,255,0.5); line-height:1.6;
                     margin-bottom:6px;">
             Sistema especializado na <b style="color:#cce0ff;">Nova Lei de Licitações (14.133)</b>.
