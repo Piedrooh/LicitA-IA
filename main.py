@@ -482,6 +482,11 @@ with st.sidebar:
             st.session_state[k] = None
         if "vault" in st.session_state:
             del st.session_state["vault"]
+        # Reseta também o perfil da empresa
+        st.session_state.empresa = {
+            "cnpj": "", "razao_social": "", "capital_social": 0.0,
+            "liquidez_corrente": 1.0, "certificacoes": [], "atestados": ""
+        }
         st.rerun()
 
     # ── Rodapé ────────────────────────────────────────────
