@@ -299,7 +299,8 @@ def init_state():
     defaults = {
         "empresa": {
             "cnpj": "", "razao_social": "", "capital_social": 0.0,
-            "liquidez_corrente": 1.0, "certificacoes": [], "atestados": ""
+            "liquidez_corrente": 1.0, "certificacoes": [], "atestados": "",
+            "ativo_circulante": 0.0, "passivo_circulante": 0.0
         },
         "resultado_auditoria": None,
         "resultado_cacador":   None,
@@ -485,7 +486,8 @@ with st.sidebar:
         # Reseta também o perfil da empresa
         st.session_state.empresa = {
             "cnpj": "", "razao_social": "", "capital_social": 0.0,
-            "liquidez_corrente": 1.0, "certificacoes": [], "atestados": ""
+            "liquidez_corrente": 1.0, "certificacoes": [], "atestados": "",
+            "ativo_circulante": 0.0, "passivo_circulante": 0.0
         }
         st.rerun()
 
@@ -527,8 +529,7 @@ with tab_perfil:
         <p>Configure o DNA corporativo da sua empresa para auditorias personalizadas.</p>
     </div>""", unsafe_allow_html=True)
 
-    # Card CNPJ
-
+    # ── Pesquisa por CNPJ ────────────────────────────────
     st.markdown("**Pesquisa Rápida por CNPJ**")
     cc1, cc2 = st.columns([4, 1])
     with cc1:
@@ -550,8 +551,8 @@ with tab_perfil:
                         if resp.status_code == 200:
                             dados = resp.json()
                             st.session_state.empresa.update({
-                                "cnpj":          cnpj_limpo,
-                                "razao_social":  dados.get("razao_social", ""),
+                                "cnpj":           cnpj_limpo,
+                                "razao_social":   dados.get("razao_social", ""),
                                 "capital_social": float(dados.get("capital_social") or 0.0),
                             })
                             st.success(f"Empresa encontrada: {dados.get('razao_social')}")
@@ -564,6 +565,8 @@ with tab_perfil:
                 st.warning("Digite um CNPJ com 14 dígitos.")
 
     st.divider()
+
+    # ── Dados Cadastrais ─────────────────────────────────
     section("🏛️", "Verifique e Complete as Informações")
     f1, f2 = st.columns(2)
     with f1:
@@ -574,49 +577,122 @@ with tab_perfil:
                                   value=float(st.session_state.empresa["capital_social"]),
                                   min_value=0.0, step=1000.0, format="%.2f")
 
-    f3, f4 = st.columns(2)
-    with f3:
-        liquidez = st.number_input("Índice de Liquidez Corrente",
-                                   value=float(st.session_state.empresa["liquidez_corrente"]),
-                                   min_value=0.0, step=0.1, format="%.2f")
-    with f4:
-        st.write("")  # espaço intencional
+    st.divider()
 
-    # Certificações
-    st.markdown("**CERTIFICAÇÕES ATIVAS**", help="Selecione todas as certificações vigentes da empresa")
+    # ── Calculadora de Liquidez ──────────────────────────
+    section("🧮", "Calculadora de Liquidez Corrente")
+    st.caption("Preencha o Ativo e Passivo Circulante para calcular automaticamente o índice de liquidez.")
+
+    liq_col1, liq_col2, liq_col3 = st.columns([2, 2, 1])
+    with liq_col1:
+        ativo_circ = st.number_input(
+            "Ativo Circulante (R$)",
+            value=st.session_state.empresa.get("ativo_circulante", 0.0),
+            min_value=0.0, step=1000.0, format="%.2f"
+        )
+    with liq_col2:
+        passivo_circ = st.number_input(
+            "Passivo Circulante (R$)",
+            value=st.session_state.empresa.get("passivo_circulante", 0.0),
+            min_value=0.0, step=1000.0, format="%.2f"
+        )
+    with liq_col3:
+        # Calcula dinamicamente
+        if passivo_circ > 0:
+            liq = round(ativo_circ / passivo_circ, 2)
+        elif ativo_circ > 0:
+            liq = float("inf")
+        else:
+            liq = st.session_state.empresa.get("liquidez_corrente", 1.0)
+
+        liq_display = f"{liq:.2f}" if liq != float("inf") else "∞"
+        st.markdown(f"""
+        <div style="text-align:center; padding:10px 0 4px 0;">
+            <div style="font-size:10px; font-weight:700; letter-spacing:0.08em;
+                        text-transform:uppercase; color:var(--text-color); opacity:0.55;
+                        margin-bottom:6px;">Índice Calculado</div>
+            <div style="font-size:28px; font-weight:800;
+                        color:{'#22c55e' if liq >= 1.0 else '#ef4444'};">
+                {liq_display}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Feedback instantâneo de saúde financeira
+    if passivo_circ > 0:
+        if liq >= 1.0:
+            st.success(
+                f"✅ Índice de Liquidez de **{liq:.2f}** — Saúde financeira adequada. "
+                f"Sua empresa possui R$ {liq:.2f} em ativos para cada R$ 1,00 de obrigações de curto prazo. "
+                f"Apta para a maioria dos editais."
+            )
+        else:
+            st.error(
+                f"⚠️ Índice de Liquidez de **{liq:.2f}** — Risco de inabilitação. "
+                f"Editais que exigem liquidez ≥ 1,0 (Lei 14.133/21, Art. 69) podem desclassificar sua empresa. "
+                f"Considere reforço de capital de giro antes de participar."
+            )
+
+    st.divider()
+
+    # ── Certificações ────────────────────────────────────
+    st.markdown("**CERTIFICAÇÕES ATIVAS**",
+                help="Selecione todas as certificações vigentes da empresa")
     certif = st.multiselect(
         "Certificações", label_visibility="collapsed",
         options=["ISO 9001", "ISO 14001", "ISO 27001", "SASSMAQ", "PBQP-H", "OHSAS 18001"],
         default=st.session_state.empresa["certificacoes"]
     )
 
-    # Pills de preview
     if certif:
         pills_html = '<div class="cert-pill-wrap">' + \
                      "".join(f'<span class="cert-pill">{c}</span>' for c in certif) + \
                      '</div>'
         st.markdown(pills_html, unsafe_allow_html=True)
     else:
-        st.markdown('<div class="cert-pill-wrap"><span class="cert-pill-empty">Nenhuma certificação selecionada</span></div>',
-                    unsafe_allow_html=True)
+        st.markdown(
+            '<div class="cert-pill-wrap">'
+            '<span class="cert-pill-empty">Nenhuma certificação selecionada</span>'
+            '</div>',
+            unsafe_allow_html=True
+        )
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    st.divider()
 
+    # ── Atestados — Cérebro do Caçador ───────────────────
+    st.info(
+        "🎯 **Este campo é o cérebro do módulo Caçador (Matching).**\n\n"
+        "Quanto mais detalhados forem seus atestados e contratos anteriores, "
+        "mais preciso será o matchmaking de editais compatíveis com o seu perfil. "
+        "Inclua objeto, órgão contratante, valor e período de cada contrato."
+    )
     atestados = st.text_area(
         "Atestados e Contratos Relevantes",
         value=st.session_state.empresa.get("atestados", ""),
-        placeholder="Ex: Fornecimento de EPI para Petrobras (2022-2024), contrato de R$ 1,2M...",
-        height=110
+        placeholder=(
+            "Ex: Fornecimento de 5.000 uniformes para Petrobras (2022-2024), contrato de R$ 1,2M\n"
+            "Ex: Prestação de serviços de limpeza predial para Prefeitura de SP (2023), R$ 800k\n"
+            "Ex: Fornecimento de EPI para Embraer (2021-2023), contrato de R$ 450k"
+        ),
+        height=140
     )
 
+    st.markdown("<br>", unsafe_allow_html=True)
+
     if st.button("💾 Salvar e Validar Cadastro"):
+        # Usa o índice calculado se disponível, senão mantém o anterior
+        liquidez_final = liq if passivo_circ > 0 and liq != float("inf") else \
+                         st.session_state.empresa.get("liquidez_corrente", 1.0)
+
         st.session_state.empresa.update({
-            "cnpj":              "".join(filter(str.isdigit, cnpj_input)),
-            "razao_social":      razao,
-            "capital_social":    capital,
-            "liquidez_corrente": liquidez,
-            "certificacoes":     certif,
-            "atestados":         atestados,
+            "cnpj":               "".join(filter(str.isdigit, cnpj_input)),
+            "razao_social":       razao,
+            "capital_social":     capital,
+            "liquidez_corrente":  liquidez_final,
+            "ativo_circulante":   ativo_circ,
+            "passivo_circulante": passivo_circ,
+            "certificacoes":      certif,
+            "atestados":          atestados,
         })
         st.success("✅ Perfil salvo com sucesso! O motor de auditoria está calibrado.")
 
