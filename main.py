@@ -18,7 +18,7 @@ import os
 
 # Cria a pasta de logs se ela não existir
 if not os.path.exists("logs"):
-    os.makedirs("logs"
+    os.makedirs("logs")
                 
 # ══════════════════════════════════════════
 # MÓDULOS EMBARCADOS (sentinela, anti_preco, compliance, agu_parser)
