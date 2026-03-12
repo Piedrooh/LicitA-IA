@@ -4,7 +4,6 @@ import anthropic
 import requests
 import fitz  # PyMuPDF
 import json
-import time
 
 # --- 1. CONFIGURAÇÕES E TEMA ---
 st.set_page_config(
@@ -24,23 +23,12 @@ st.markdown("""
         border-radius: 6px 6px 0 0;
         padding: 10px 16px;
         font-weight: 600;
+        color: #434343;
     }
     .stTabs [aria-selected="true"] {
         background: linear-gradient(90deg, #096dd9 0%, #003a8c 100%) !important;
         color: white !important;
     }
-    .card {
-        background-color: var(--secondary-background-color);
-        color: var(--text-color);
-        padding: 25px;
-        border-radius: 12px;
-        border-left: 8px solid #096dd9;
-        margin-bottom: 20px;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.08);
-    }
-    .critical     { border-left-color: #ff4b4b; }
-    .warning-card { border-left-color: #ffa500; }
-    .success-card { border-left-color: #52c41a; }
     .stButton>button {
         background: linear-gradient(90deg, #096dd9 0%, #003a8c 100%);
         color: white;
@@ -56,6 +44,51 @@ st.markdown("""
         box-shadow: 0 5px 15px rgba(0,58,140,0.3);
         color: white;
     }
+
+    /* FIX: Degradê nas tags do multiselect */
+    .stMultiSelect div[data-baseweb="tag"] {
+        background: linear-gradient(90deg, #096dd9 0%, #003a8c 100%) !important;
+        color: white !important;
+        border-radius: 4px;
+    }
+    .stMultiSelect div[data-baseweb="tag"] span {
+        color: white !important;
+    }
+
+    /* Cards padrão */
+    .card {
+        background-color: var(--secondary-background-color);
+        color: var(--text-color);
+        padding: 25px;
+        border-radius: 12px;
+        border-left: 8px solid #096dd9;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+    }
+    .critical     { border-left-color: #ff4b4b; }
+    .warning-card { border-left-color: #ffa500; }
+    .success-card { border-left-color: #52c41a; }
+
+    /* FIX: cert-card usa variáveis CSS para funcionar em dark mode também */
+    .cert-card {
+        background-color: var(--secondary-background-color);
+        border: 1px solid rgba(9, 109, 217, 0.25);
+        padding: 15px 20px;
+        border-radius: 8px;
+        margin-bottom: 10px;
+        display: flex;
+        align-items: center;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    }
+    .cert-icon {
+        font-size: 22px;
+        margin-right: 12px;
+    }
+    .cert-text {
+        font-weight: 600;
+        font-size: 15px;
+        color: var(--text-color);
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -65,7 +98,7 @@ def init_state():
     defaults = {
         "empresa": {
             "cnpj": "", "razao_social": "", "capital_social": 0.0,
-            "liquidez_corrente": 1.0, "certificacoes": []
+            "liquidez_corrente": 1.0, "certificacoes": [], "atestados": ""
         },
         "resultado_auditoria": None,
         "resultado_cacador":   None,
@@ -82,7 +115,6 @@ init_state()
 # --- 3. UTILITÁRIOS ---
 
 def extrair_texto_pdf(file, max_chars: int = 80_000) -> str:
-    """Extrai texto do PDF (limitado para não estourar o contexto do LLM)."""
     file.seek(0)
     try:
         doc = fitz.open(stream=file.read(), filetype="pdf")
@@ -104,7 +136,6 @@ def get_claude(api_key: str) -> anthropic.Anthropic:
 
 def chamar_claude(client: anthropic.Anthropic, system: str, user: str,
                   max_tokens: int = 2048) -> str:
-    """Wrapper seguro para chamadas ao Claude."""
     try:
         resposta = client.messages.create(
             model="claude-sonnet-4-5",
@@ -151,6 +182,25 @@ def render_card(titulo: str, subtitulo: str, corpo: str, classe: str = ""):
     """, unsafe_allow_html=True)
 
 
+def render_certificacao(cert: str):
+    """Renderiza uma certificação como card com ícone."""
+    icon_map = {
+        "ISO 9001":   "✅",
+        "ISO 14001":  "🌱",
+        "ISO 27001":  "🔒",
+        "SASSMAQ":    "🚒",
+        "PBQP-H":     "🏗️",
+        "OHSAS 18001":"⛑️",
+    }
+    icon = icon_map.get(cert, "📄")
+    st.markdown(f"""
+    <div class="cert-card">
+        <span class="cert-icon">{icon}</span>
+        <span class="cert-text">{cert}</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 # --- 4. SIDEBAR ---
 with st.sidebar:
     st.image("https://img.icons8.com/fluency/96/shield.png", width=80)
@@ -179,6 +229,7 @@ with st.sidebar:
                   "resultado_juridico", "resultado_espiao"]:
             st.session_state[k] = None
         st.rerun()
+
 
 # --- CABEÇALHO ---
 st.markdown('<h1 style="font-size:38px; margin-bottom:0;">🛡️ LicitA-IA: Intelligence Unit</h1>',
@@ -214,14 +265,13 @@ with tab_perfil:
             if len(cnpj_limpo) == 14:
                 with st.spinner("Conectando aos servidores do Governo..."):
                     try:
-                        url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}"
+                        url  = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}"
                         resp = requests.get(url, timeout=10)
                         if resp.status_code == 200:
                             dados = resp.json()
                             st.session_state.empresa.update({
                                 "cnpj":          cnpj_limpo,
                                 "razao_social":  dados.get("razao_social", ""),
-                                # FIX: or 0.0 evita crash se API retornar None
                                 "capital_social": float(dados.get("capital_social") or 0.0),
                             })
                             st.success(f"Empresa encontrada: {dados.get('razao_social')}")
@@ -245,33 +295,47 @@ with tab_perfil:
         liquidez = st.number_input("Índice de Liquidez Corrente",
                                    value=float(st.session_state.empresa["liquidez_corrente"]),
                                    min_value=0.0, step=0.1, format="%.2f")
-        certif   = st.multiselect(
-            "Certificações Ativas",
-            ["ISO 9001", "ISO 14001", "ISO 27001", "SASSMAQ", "PBQP-H", "OHSAS 18001"],
-            default=st.session_state.empresa["certificacoes"]
-        )
+
+    # --- Módulo de Certificações ---
+    st.markdown("---")
+    st.markdown("### Certificações Ativas")
+    certif = st.multiselect(
+        "Selecione suas certificações",
+        ["ISO 9001", "ISO 14001", "ISO 27001", "SASSMAQ", "PBQP-H", "OHSAS 18001"],
+        default=st.session_state.empresa["certificacoes"],
+        label_visibility="collapsed"
+    )
+
+    if certif:
+        col_cert1, col_cert2, col_cert3 = st.columns(3)
+        cols = [col_cert1, col_cert2, col_cert3]
+        for i, cert in enumerate(sorted(certif)):
+            with cols[i % 3]:
+                render_certificacao(cert)
+    else:
+        st.info("Nenhuma certificação ativa cadastrada.")
 
     atestados = st.text_area(
         "Descreva brevemente os principais contratos/atestados da empresa:",
+        value=st.session_state.empresa.get("atestados", ""),
         placeholder="Ex: Fornecimento de EPI para Petrobras (2022-2024), contrato de R$ 1,2M...",
         height=120
     )
 
     if st.button("💾 Blindar Perfil e Salvar"):
-        # FIX: sempre salva CNPJ somente com dígitos
         st.session_state.empresa.update({
-            "cnpj":             "".join(filter(str.isdigit, cnpj_input)),
-            "razao_social":     razao,
-            "capital_social":   capital,
+            "cnpj":              "".join(filter(str.isdigit, cnpj_input)),
+            "razao_social":      razao,
+            "capital_social":    capital,
             "liquidez_corrente": liquidez,
-            "certificacoes":    certif,
-            "atestados":        atestados,
+            "certificacoes":     certif,
+            "atestados":         atestados,
         })
         st.success("✅ DNA salvo! O Motor de Auditoria está calibrado para a sua empresa.")
 
 
 # ==========================================
-# ABA 2: AUDITORIA DE EDITAIS (CLAUDE REAL)
+# ABA 2: AUDITORIA DE EDITAIS
 # ==========================================
 with tab_auditoria:
     st.subheader("Auditoria de Conformidade e Riscos com IA")
@@ -287,28 +351,27 @@ with tab_auditoria:
             with st.status("Auditando edital com Claude...", expanded=True) as status:
                 st.write("📄 Extraindo texto do PDF...")
                 texto_edital = extrair_texto_pdf(edital_file)
-                total_chars  = len(texto_edital)
 
-                st.write(f"🧠 Analisando {total_chars:,} caracteres com Claude...")
-
+                st.write(f"🧠 Analisando {len(texto_edital):,} caracteres com Claude...")
                 client = get_claude(api_key)
 
+                # FIX: system prompt sem replace() que corrompia aspas e quebras de linha
                 system = """Você é um auditor sênior de licitações especialista na Lei 14.133/2021 e Lei 8.666/93.
 Sua função é identificar TODAS as cláusulas que podem desclassificar ou prejudicar o licitante descrito.
 Responda SOMENTE com um JSON válido no formato abaixo, sem markdown, sem texto extra:
 {
   "riscos": [
     {
-      "severidade": "CRITICO" | "ATENCAO" | "INFO",
-      "categoria": "string (ex: Capacidade Técnica, Habilitação Financeira, Prazo, etc.)",
-      "pagina": "string (ex: Pág. 14 ou Desconhecida)",
+      "severidade": "CRITICO | ATENCAO | INFO",
+      "categoria": "ex: Capacidade Técnica, Habilitação Financeira, Prazo",
+      "pagina": "ex: Pág. 14 ou Desconhecida",
       "titulo": "string curta",
       "descricao": "string detalhada explicando o risco e o artigo de lei violado",
       "acao": "string com plano de ação recomendado"
     }
   ],
-  "resumo": "string com avaliação geral do edital em 3-4 linhas",
-  "score_seguranca": number (0 a 100, sendo 100 sem riscos)
+  "resumo": "avaliação geral do edital em 3-4 linhas",
+  "score_seguranca": 0
 }"""
 
                 user = f"""PERFIL DA EMPRESA LICITANTE:
@@ -321,7 +384,6 @@ Analise o edital completo, cruze com o perfil da empresa e retorne o JSON com to
 
                 raw = chamar_claude(client, system, user, max_tokens=4096)
 
-                # Parse seguro do JSON
                 try:
                     clean = raw.strip().replace("```json", "").replace("```", "")
                     st.session_state.resultado_auditoria = json.loads(clean)
@@ -332,7 +394,6 @@ Analise o edital completo, cruze com o perfil da empresa e retorne o JSON com to
 
                 status.update(label="✅ Auditoria Concluída!", state="complete", expanded=False)
 
-        # Exibição de resultados
         if st.session_state.resultado_auditoria:
             resultado = st.session_state.resultado_auditoria
             riscos    = resultado.get("riscos", [])
@@ -340,20 +401,17 @@ Analise o edital completo, cruze com o perfil da empresa e retorne o JSON com to
             criticos  = [r for r in riscos if r["severidade"] == "CRITICO"]
             atencoes  = [r for r in riscos if r["severidade"] == "ATENCAO"]
 
-            # Métricas
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Score de Segurança", f"{score}/100",
                       delta_color="inverse" if score < 60 else "normal")
-            m2.metric("Riscos Críticos",  len(criticos), delta_color="inverse")
-            m3.metric("Pontos de Atenção", len(atencoes), delta_color="off")
-            m4.metric("Total de Riscos",   len(riscos))
+            m2.metric("Riscos Críticos",    len(criticos), delta_color="inverse")
+            m3.metric("Pontos de Atenção",  len(atencoes), delta_color="off")
+            m4.metric("Total de Riscos",    len(riscos))
 
-            # Resumo
             st.markdown("---")
             render_card("Avaliação Geral do Edital", "📋 RESUMO EXECUTIVO",
                         resultado.get("resumo", ""))
 
-            # Cards de risco ordenados por severidade
             st.markdown("### Riscos Identificados")
             ordem = {"CRITICO": 0, "ATENCAO": 1, "INFO": 2}
             for r in sorted(riscos, key=lambda x: ordem.get(x["severidade"], 3)):
@@ -363,8 +421,7 @@ Analise o edital completo, cruze com o perfil da empresa e retorne o JSON com to
                 render_card(
                     r["titulo"],
                     f"{'🚨' if r['severidade'] == 'CRITICO' else '⚠️'} {r['severidade']} | {r['pagina']} | {r['categoria']}",
-                    corpo,
-                    classe
+                    corpo, classe
                 )
 
 
@@ -390,10 +447,10 @@ with tab_cacador:
                 "SE", "PI", "MA", "TO", "RO", "AC", "AP", "RR"
             ])
         with col2:
-            valor_min = st.number_input("Valor mínimo estimado (R$)", value=0.0,
-                                        step=10000.0, format="%.2f")
-            valor_max = st.number_input("Valor máximo estimado (R$)", value=1_000_000.0,
-                                        step=10000.0, format="%.2f")
+            valor_min  = st.number_input("Valor mínimo estimado (R$)", value=0.0,
+                                         step=10000.0, format="%.2f")
+            valor_max  = st.number_input("Valor máximo estimado (R$)", value=1_000_000.0,
+                                         step=10000.0, format="%.2f")
             modalidade = st.multiselect(
                 "Modalidades aceitas:",
                 ["Pregão Eletrônico", "Concorrência", "Tomada de Preços", "Convite", "RDC"],
@@ -412,23 +469,23 @@ with tab_cacador:
                 client = get_claude(api_key)
 
                 system = """Você é um especialista em prospecção de licitações públicas no Brasil.
-Sua função é avaliar a compatibilidade do perfil da empresa com o segmento desejado e gerar um relatório estratégico de oportunidades.
+Avalie a compatibilidade do perfil da empresa com o segmento e gere relatório estratégico de oportunidades.
 Responda SOMENTE com JSON válido no formato:
 {
-  "compatibilidade_geral": number (0 a 100),
+  "compatibilidade_geral": 0,
   "analise": "string com análise detalhada do potencial competitivo",
   "oportunidades": [
     {
-      "titulo": "string descrevendo o tipo de licitação",
-      "orgao_exemplo": "string com órgão público típico que contrata isso",
-      "valor_estimado": "string (faixa de valor)",
-      "compatibilidade": number (0 a 100),
+      "titulo": "string",
+      "orgao_exemplo": "string",
+      "valor_estimado": "string",
+      "compatibilidade": 0,
       "pontos_fortes": ["string"],
       "pontos_fracos": ["string"],
       "proximos_passos": "string"
     }
   ],
-  "recomendacoes": ["string com recomendação estratégica"]
+  "recomendacoes": ["string"]
 }"""
 
                 user = f"""PERFIL DA EMPRESA:
@@ -441,7 +498,7 @@ Estado: {uf}
 Faixa de valor: R$ {valor_min:,.2f} a R$ {valor_max:,.2f}
 Modalidades: {', '.join(modalidade)}
 
-Avalie a compatibilidade e gere análise estratégica de oportunidades de licitação para este perfil."""
+Avalie a compatibilidade e gere análise estratégica de oportunidades."""
 
                 raw = chamar_claude(client, system, user, max_tokens=3000)
                 try:
@@ -457,7 +514,7 @@ Avalie a compatibilidade e gere análise estratégica de oportunidades de licita
 
             st.markdown("---")
             m1, m2 = st.columns(2)
-            m1.metric("Compatibilidade Geral", f"{res.get('compatibilidade_geral', 0)}%")
+            m1.metric("Compatibilidade Geral",  f"{res.get('compatibilidade_geral', 0)}%")
             m2.metric("Oportunidades Mapeadas", len(opps))
 
             render_card("Análise Estratégica", "🎯 DIAGNÓSTICO DE POTENCIAL",
@@ -473,9 +530,7 @@ Avalie a compatibilidade e gere análise estratégica de oportunidades de licita
                     f"<b>⚠️ Pontos Fracos:</b> {', '.join(opp.get('pontos_fracos', []))}<br>"
                     f"<b>🚀 Próximos Passos:</b> {opp.get('proximos_passos', 'N/A')}"
                 )
-                render_card(opp["titulo"],
-                            f"🎯 MATCH: {comp}%",
-                            corpo, classe)
+                render_card(opp["titulo"], f"🎯 MATCH: {comp}%", corpo, classe)
 
             st.markdown("### 📋 Recomendações Estratégicas")
             for rec in res.get("recomendacoes", []):
@@ -502,11 +557,15 @@ with tab_juridico:
 
         col1, col2 = st.columns(2)
         with col1:
-            orgao       = st.text_input("Órgão / Entidade Licitante:", placeholder="Ex: Prefeitura Municipal de Campinas")
-            num_edital  = st.text_input("Número do Edital / Pregão:", placeholder="Ex: Pregão Eletrônico 001/2025")
+            orgao       = st.text_input("Órgão / Entidade Licitante:",
+                                        placeholder="Ex: Prefeitura Municipal de Campinas")
+            num_edital  = st.text_input("Número do Edital / Pregão:",
+                                        placeholder="Ex: Pregão Eletrônico 001/2025")
         with col2:
-            objeto      = st.text_input("Objeto da Licitação:", placeholder="Ex: Aquisição de uniformes profissionais")
-            data_sesssao = st.text_input("Data da Sessão/Prazo:", placeholder="Ex: 20/01/2025")
+            objeto       = st.text_input("Objeto da Licitação:",
+                                         placeholder="Ex: Aquisição de uniformes profissionais")
+            data_sessao  = st.text_input("Data da Sessão/Prazo:",
+                                         placeholder="Ex: 20/01/2025")
 
         fundamento = st.text_area(
             "Descreva o problema / fundamento da peça (o que quer contestar ou esclarecer):",
@@ -539,15 +598,15 @@ DADOS DO PROCESSO:
 Órgão/Entidade: {orgao}
 Número do Edital: {num_edital}
 Objeto: {objeto}
-Data da Sessão/Prazo: {data_sesssao}
+Data da Sessão/Prazo: {data_sessao}
 
 FUNDAMENTO / PROBLEMA A SER CONTESTADO:
 {fundamento}
 
 Redija a peça completa, formal e fundamentada."""
 
-                    peça = chamar_claude(client, system, user, max_tokens=4096)
-                    st.session_state.resultado_juridico = {"tipo": tipo_peca, "texto": peça}
+                    peca = chamar_claude(client, system, user, max_tokens=4096)
+                    st.session_state.resultado_juridico = {"tipo": tipo_peca, "texto": peca}
 
         if st.session_state.resultado_juridico:
             res = st.session_state.resultado_juridico
@@ -590,9 +649,8 @@ with tab_espiao:
                                 f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_c}", timeout=10
                             )
                             if resp.status_code == 200:
-                                d = resp.json()
-                                st.session_state["dados_concorrente"] = d
-                                st.success(f"Encontrado: {d.get('razao_social')}")
+                                st.session_state["dados_concorrente"] = resp.json()
+                                st.success(f"Encontrado: {resp.json().get('razao_social')}")
                             else:
                                 st.error("CNPJ não encontrado.")
                         except Exception as e:
@@ -647,18 +705,18 @@ with tab_espiao:
 Analise os dados do concorrente e gere um dossiê estratégico para ajudar a empresa cliente a vencer a disputa.
 Responda SOMENTE com JSON válido no formato:
 {
-  "perfil_competitivo": "string com análise do concorrente",
+  "perfil_competitivo": "string",
   "pontos_vulneraveis": ["string"],
   "estrategias_vencer": [
     {
       "estrategia": "string",
-      "descricao": "string detalhada",
-      "risco": "BAIXO" | "MEDIO" | "ALTO"
+      "descricao": "string",
+      "risco": "BAIXO | MEDIO | ALTO"
     }
   ],
-  "alerta_dumping": boolean,
-  "preco_referencia": "string com estimativa de preço que o concorrente praticará",
-  "recomendacao_final": "string com recomendação executiva de 3-4 linhas"
+  "alerta_dumping": false,
+  "preco_referencia": "string",
+  "recomendacao_final": "string"
 }"""
 
                     user = f"""MINHA EMPRESA (cliente):
@@ -687,7 +745,6 @@ Monte o dossiê competitivo completo e as estratégias para vencer este concorre
 
             st.markdown("---")
 
-            # Alerta de Dumping
             if res.get("alerta_dumping"):
                 render_card(
                     "⚠️ Risco de Dumping Detectado",
@@ -697,14 +754,15 @@ Monte o dossiê competitivo completo e as estratégias para vencer este concorre
                 )
 
             render_card("Perfil Competitivo", "🕵️ DOSSIÊ DO CONCORRENTE",
-                        res.get("perfil_competitivo", ""), "")
+                        res.get("perfil_competitivo", ""))
 
             st.markdown(f"**💰 Estimativa de Preço do Concorrente:** {res.get('preco_referencia', 'N/A')}")
 
             st.markdown("### 🎯 Estratégias para Vencer")
             for est in res.get("estrategias_vencer", []):
                 risco  = est.get("risco", "BAIXO")
-                classe = "critical" if risco == "ALTO" else ("warning-card" if risco == "MEDIO" else "success-card")
+                classe = "critical" if risco == "ALTO" else \
+                         "warning-card" if risco == "MEDIO" else "success-card"
                 render_card(
                     est.get("estrategia", ""),
                     f"⚡ ESTRATÉGIA | Risco: {risco}",
